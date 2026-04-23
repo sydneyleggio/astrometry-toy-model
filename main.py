@@ -322,7 +322,71 @@ def main():
     ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.show()
+    plot_full_snr(gamma, ell_min, ell_max, rho_plat, x_weak, rho_weak_line)
 
+# ============================================================
+#                   FULL SNR CURVE
+# ============================================================
+
+def rho_cp_full(x_arr, gamma_matrix, ell_min, ell_max):
+    factor = 192.0 * np.pi**3
+
+    # Off-diagonal pairs
+    vals = gamma_matrix.flatten()
+    gammas = vals[np.isfinite(vals) & (np.abs(vals) > EPS)]
+
+    P_gw_arr = x_arr[:, None] * P_n
+    g = gammas[None, :]
+
+    numer = P_gw_arr**2
+    denom = (P_gw_arr**2 * g**2
+             + 2.0 * P_gw_arr * g * sigma_bar_sq / factor
+             + sigma_bar_sq**2 / factor**2)
+
+    rho_sq = np.sum(numer / denom, axis=1)
+
+    # Diagonal contribution: theta=0, delta_ab=1
+    gamma_diag = gamma_parallel(np.array([0.0]), ell_min, ell_max)[0]
+    g_d = gamma_diag
+
+    numer_diag = (P_gw_arr**2).squeeze()
+    denom_diag = (P_gw_arr.squeeze()**2 * g_d**2
+                  + 2.0 * P_gw_arr.squeeze() * g_d * sigma_bar_sq / factor
+                  + sigma_bar_sq**2 / factor**2)
+
+    rho_sq += N_STARS * numer_diag / denom_diag
+
+    return np.sqrt(np.maximum(rho_sq, 0.0))
+
+
+def plot_full_snr(gamma_matrix, ell_min, ell_max, rho_plat, x_weak, rho_weak_line):
+    """
+    Plot rho_cp full curve together with the two
+    approximate regime lines already computed in main().
+    """
+    x_full = np.logspace(-4, 8, 600)
+    rho_full = rho_cp_full(x_full, gamma_matrix, ell_min, ell_max)
+
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # Approximate regime lines (from main) for comparison
+    ax.loglog(x_weak, rho_weak_line, linewidth=1.5, linestyle='--',
+              color="#919191", alpha=0.7, label='Weak signal regime')
+    ax.axhline(rho_plat, linewidth=1.5, linestyle='--',
+               color="#494949", alpha=0.7, label='Intermediate signal regime')
+
+    # Full curve
+    ax.loglog(x_full, rho_full, linewidth=2.5,
+              color='C2', label='Full curve')
+
+    ax.set_xlabel(r'$P_{\rm gw}/P_n$')
+    ax.set_ylabel(r'$\rho_{cp}$')
+    ax.set_title('Full SNR Curve with Regime Approximations')
+    ax.legend()
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == '__main__':
     main()
