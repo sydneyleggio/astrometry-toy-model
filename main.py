@@ -68,6 +68,7 @@ def pairwise_theta(stars_deg):
 def compute_ell_limits(theta_matrix, field_size_deg):
     """
     ell_min = 2 (per Kris suggestion)
+    Previously suggested 1/FoV but that did not create anything meaningful for the curve.
     ell_max = 2*pi / min_angular_separation  (in radians)
     """
     ell_min = 2
