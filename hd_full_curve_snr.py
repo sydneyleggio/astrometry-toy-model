@@ -3,23 +3,24 @@ hd_full_curve_snr.py
 ====================
 Plots the full-curve HD SNR vs r = P_gw(f_l)/P_n.
 
-Uses the pair-by-pair diagonal approximation of C^{-1}, which is:
-  - Smooth across all regimes (no matrix inversion required)
-  - Equivalent to treating each pair estimator independently
-  - Consistent with Romano's approach for figure 3
+Uses the pair-by-pair diagonal approximation of C^{-1}.
 
-For each pair (a,b), the contribution to rho^2 is:
+For each pair (a,b), the contribution to rho^2 is (from Romano Case 3 inversion):
 
-    rho^2_HD = sum_{a<b}  P_gw^2 / [ P_gw^2 * gamma_ab^2
-                                      + 2 * P_gw * gamma_ab * sigma^2 / (192pi^3)
-                                      + sigma^4 / (192pi^3)^2 ]
+    rho^2_HD = sum_{a<b}  2 * Pgw^2 * (F*gamma_ab)^2
+                          / [ (Pgw * F*gamma_ab)^2 + (Pgw + sigma^2)^2 ]
 
-where gamma_ab = gamma_parallel(theta_ab) is the (unnormalised) overlap function
+where F = 192*pi^3, gamma_ab = gamma_parallel(theta_ab) (raw, without F),
 and r = P_gw / P_n is the x-axis variable.
 
-Limits:
-  Weak signal (r -> 0):   rho ~ sqrt(2 * sum chi_ab^2) * r
-  Intermediate (r -> inf): rho plateaus at sqrt(sum 1/chi_ab^2)
+Correct asymptotes:
+  Weak signal (r -> 0):
+    rho^2 -> 2 * F^2 * sum(gamma_ab^2) * r^2
+    rho   -> sqrt(2) * F * sqrt(sum(gamma_ab^2)) * r
+
+  Intermediate (r -> inf):
+    rho^2 -> sum_{a<b}  2*(F*gamma_ab)^2 / ((F*gamma_ab)^2 + 1)
+    rho   -> sqrt(sum_{a<b} 2*(F*gamma_ab)^2 / ((F*gamma_ab)^2 + 1))
 """
 
 import numpy as np
@@ -51,19 +52,36 @@ ASTRO_FACTOR = 192.0 * np.pi**3
 
 def rho_hd_weak(gammas, r_values):
     """
-    Weak-signal limit: rho^2 = 2 * sum_ab gamma_ab^2 * r^2
-    Matches Romano eq. 40 with gamma_ab -> gamma_parallel values.
+    Weak-signal asymptote: rho^2 = 2 * F^2 * sum(gamma_ab^2) * r^2
+
+    Derived from the correct HD formula in the limit Pgw << sigma^2:
+      numer -> 2 * Pgw^2 * (F*g)^2
+      denom -> sigma^4
+      rho^2 -> 2 * (F*g*r)^2  (summed over pairs, using Pgw = r*P_n = r*sigma^2)
     """
+    F = ASTRO_FACTOR
     sum_gamma2 = float(np.sum(gammas**2))
-    return np.sqrt(2.0 * sum_gamma2) * r_values
+    return np.sqrt(2.0) * F * np.sqrt(sum_gamma2) * np.asarray(r_values, dtype=float)
 
 
 def rho_hd_intermediate(gammas):
     """
-    Intermediate-signal plateau: rho^2 = sum_ab 1/gamma_ab^2
-    Matches Romano eq. 41.
+    Intermediate-signal plateau: rho^2 = sum_{a<b} 2*(F*g)^2 / ((F*g)^2 + 1)
+
+    Derived from the correct HD formula in the limit Pgw >> sigma^2:
+      (Pgw + sigma^2)^2 -> Pgw^2
+      rho^2_ab -> 2*(F*g)^2 / ((F*g)^2 + 1)  (Pgw^2 cancels)
+
+    This is a pure geometric number, independent of r.
+
+    For F*g << 1 (typical for a 10-degree field, where g ~ 1e-5 and F*g ~ 0.06):
+      rho^2_ab ~ 2*(F*g)^2  -- the plateau is numerically close to the
+      weak-signal value at r=1, not a large number.
     """
-    return float(np.sqrt(np.sum(1.0 / gammas**2)))
+    F  = ASTRO_FACTOR
+    Fg = F * gammas
+    rho_sq = float(np.sum(2.0 * Fg**2 / (Fg**2 + 1.0)))
+    return np.sqrt(max(rho_sq, 0.0))
 
 
 # ============================================================
@@ -73,10 +91,7 @@ def rho_hd_intermediate(gammas):
 def plot_full_curve(gamma_matrix, n_r=400, save_path=None):
     """
     Sweep r = P_gw/P_n and plot rho_HD with asymptotes.
-
-    Uses rho_hd_full from main.py, which sums pair contributions directly.
     """
-    # Extract valid off-diagonal gamma values
     vals   = gamma_matrix[np.triu_indices_from(gamma_matrix, k=1)]
     gammas = vals[np.isfinite(vals) & (np.abs(vals) > EPS)]
     Np     = len(gammas)
@@ -92,22 +107,27 @@ def plot_full_curve(gamma_matrix, n_r=400, save_path=None):
     rho_int_val   = rho_hd_intermediate(gammas)
     rho_int_line  = np.full_like(r_values, rho_int_val)
 
+    F = ASTRO_FACTOR
     sum_gamma2 = float(np.sum(gammas**2))
-    print(f"\nsum gamma_ab^2                  = {sum_gamma2:.4f}")
-    print(f"Weak-signal prefactor sqrt(2*sum) = {np.sqrt(2*sum_gamma2):.4f}")
-    print(f"Intermediate plateau rho_int  = {rho_int_val:.4f}")
+    print(f"\nsum gamma_ab^2                       = {sum_gamma2:.4e}")
+    print(f"F^2 * sum gamma_ab^2                  = {F**2 * sum_gamma2:.4e}")
+    print(f"Weak-signal prefactor sqrt(2)*F*sqrt(sum) = {np.sqrt(2.0)*F*np.sqrt(sum_gamma2):.4f}")
+    print(f"Intermediate plateau rho_int          = {rho_int_val:.4f}")
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
     ax.loglog(r_values, rho_full,
               color='steelblue', lw=2.5, label=r'$\rho_{\rm HD}$ (full curve)')
+    ax.loglog(r_values, rho_weak_vals,
+              color='grey', lw=1.5, ls='--',
+              label=r'weak-signal asymptote')
     ax.loglog(r_values, rho_int_line,
               color='coral', lw=1.5, ls=':',
-              label=rf'intermediate plateau')
+              label=r'intermediate plateau')
 
     ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n(f_l)$', fontsize=13)
-    ax.set_ylabel(r'$\rho_{\rm HD}$',                fontsize=13)
-    ax.set_title('HD SNR Full Curve',              fontsize=13)
+    ax.set_ylabel(r'$\rho_{\rm HD}$',                 fontsize=13)
+    ax.set_title('HD SNR Full Curve',                  fontsize=13)
     ax.legend(fontsize=10)
     ax.grid(True, which='both', alpha=0.3)
     plt.tight_layout()

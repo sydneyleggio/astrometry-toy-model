@@ -285,6 +285,7 @@ def main():
     sum_inv_sq = sum_inverse_gamma_sq(gamma)
 
     rho_plat = rho_cp_intermediate(gamma0)
+    print(f'Plateau SNR (CP intermediate-signal limit) = {rho_plat:.4f}')   
 
     # Transition: rho_weak(r*) = rho_plat
     # sqrt(N)*F*r* = 1/gamma0  =>  r* = 1 / (sqrt(N)*F*gamma0)
@@ -425,7 +426,7 @@ def plot_full_snr(gamma_matrix, ell_min, ell_max, rho_plat, x_weak, rho_weak_lin
 
     ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n$')
     ax.set_ylabel(r'$\rho$')
-    ax.set_title('Full SNR Curve: Common Process')
+    ax.set_title('CP SNR Full Curve')
     ax.legend()
     ax.grid(alpha=0.3)
     plt.tight_layout()
