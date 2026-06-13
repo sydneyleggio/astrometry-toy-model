@@ -1,42 +1,37 @@
 """
-hd_full_matrix_snr.py
-=====================
-Computes the full HD SNR curve by explicitly building and inverting the
-N_pairs x N_pairs estimator covariance matrix, including all three Cases
-from your handwritten equations:
+Matrix-free version of the full HD SNR calculation.
 
-  Case 1 (no shared stars):
-    C_{ab,cd} = (1/2)(A_bar^2)^2 * (Fg_ac*Fg_bd + Fg_ad*Fg_bc) / (Fg_ab*Fg_cd)
+What changed relative to the original script:
+- No dense N_pairs x N_pairs covariance matrices are materialized for large problems.
+- The action of M(r) on a vector is computed exactly using N x N matrix products.
+- For large pair counts, the quadratic form is recovered with a preconditioned
+  MINRES solve instead of a full eigendecomposition.
+- A dense fallback is kept for small problems so the results can still be
+  checked against the original approach.
 
-  Case 2 (one shared star, e.g. c=a):
-    C_{ab,ad} = (1/2)(A_bar^2)^2 * [1 + (Pa/Pgw) * Fg_bd / (Fg_ab*Fg_ad)]
-
-  Case 3 (same pair, c=a and d=b):
-    C_{ab,ab} = (1/2)(A_bar^2)^2 * [1 + Pa*Pb/Pgw^2 * 1/Fg_ab^2]
-
-where Fg_ab = 192*pi^3 * Gamma_o(Theta_ab)  (tilde-gamma convention).
-
-The matrix M(r) = A + B/r + D/r^2 is built once from the geometry,
-then for each r = P_gw/sigma_bar^2 the SNR is:
-
-    rho^2_HD = 2 * sum_{ab,cd} (M^+)_{ab,cd}
-             = 2 * sum_k (1/lambda_k) * (sum_i V_{ik})^2
-
-where lambda_k, V are the eigendecomposition of M, and the pseudo-inverse
-is used to handle the negative eigenvalues that arise in the intermediate
-signal regime.
-
-WARNING: For N=100 stars (N_pairs=4950), each eigendecomposition takes
-~30s. Use a coarse r grid (n_r=30-50) and save results to disk.
-Total runtime: approximately 15-25 minutes.
+Important note:
+- This keeps the same covariance algebra, but the large-N path solves
+  M(r) x = 1 iteratively to avoid the prohibitive memory cost of the full
+  pair-pair matrix.
+- The matrix-vector product is exact; the only approximation is the linear
+  solver tolerance.
 """
 
-import numpy as np
+from __future__ import annotations
+
+import inspect
+import os
+import sys
+import time
+from dataclasses import dataclass
+from typing import Callable, Tuple
+
 import matplotlib.pyplot as plt
-import sys, os, time
+import numpy as np
+from scipy.sparse.linalg import LinearOperator, minres, gmres
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from main import (
+from main import (  # noqa: E402
     build_star_positions,
     pairwise_theta,
     compute_ell_limits,
@@ -48,140 +43,333 @@ from main import (
     RANDOM_SEED,
     P_n,
     sigma_bar_sq,
+    PHYSICAL_RATIO,
 )
 
-EPS    = 1e-14
+EPS = 1e-14
 F_PHYS = 192.0 * np.pi**3
 
 
+def _iterative_tol_kwargs(func, tol: float):
+    """Return version-compatible tolerance keyword arguments for SciPy solvers."""
+    params = inspect.signature(func).parameters
+    if "rtol" in params:
+        return {"rtol": tol}
+    if "tol" in params:
+        return {"tol": tol}
+    return {}
+
+
+@dataclass(frozen=True)
+class HDPairData:
+    """Compact pair geometry for the matrix-free solver."""
+
+    a_idx: np.ndarray
+    b_idx: np.ndarray
+    Fab: np.ndarray
+    F: np.ndarray
+
+    @property
+    def n_pairs(self) -> int:
+        return int(self.a_idx.size)
+
+
 # ============================================================
-#            BUILD R-INDEPENDENT COVARIANCE MATRICES
+#                 PAIR GEOMETRY / HELPERS
 # ============================================================
 
-def build_HD_matrices(gamma_matrix):
+def build_hd_pair_data(gamma_matrix: np.ndarray) -> HDPairData:
+    """Build the pair index arrays and the N x N F_g matrix once."""
+    n_star = int(gamma_matrix.shape[0])
+    a_idx, b_idx = np.triu_indices(n_star, k=1)
+    F = F_PHYS * np.array(gamma_matrix, dtype=float, copy=True)
+    np.fill_diagonal(F, 0.0)
+    Fab = F[a_idx, b_idx]
+
+    if np.any(np.abs(Fab) < EPS):
+        raise ValueError(
+            "Some pairwise F_g values are too close to zero for the current "
+            "matrix-free formulation. Check the geometry / gamma_parallel output."
+        )
+
+    return HDPairData(a_idx=a_idx, b_idx=b_idx, Fab=Fab, F=F)
+
+
+# ============================================================
+#                EXACT MATVEC FOR M(r) x
+# ============================================================
+
+def make_hd_matvec(data: HDPairData, r: float) -> Callable[[np.ndarray], np.ndarray]:
+    """Return an exact matrix-vector product for M(r).
+
+    The pair-space operator is never formed explicitly. Instead we use the
+    identity
+
+        y_ab = S_ab / F_ab - U_aa - U_bb + row_sum[a] + row_sum[b]
+               + (U_ab + U_ba)/(r F_ab) + x_ab/(r^2 F_ab^2)
+
+    where
+        X_ab = x_ab / F_ab for off-diagonal pair entries,
+        U    = F X,
+        S    = F X F,
+        row_sum[i] = sum of pair amplitudes incident to star i.
+
+    This reproduces the original A + B/r + D/r^2 algebra exactly.
     """
-    Decompose the HD estimator covariance into r-independent matrices A, B, D:
+    a_idx = data.a_idx
+    b_idx = data.b_idx
+    Fab = data.Fab
+    F = data.F
+    n_pairs = data.n_pairs
+    inv_r = 1.0 / float(r)
+    inv_r2 = inv_r * inv_r
 
-        C_{ab,cd} = (P_gw^2 / 2) * M_{ab,cd}
-        M(r)      = A + B/r + D/r^2      where r = P_gw / sigma_bar^2
+    def matvec(x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        if x.ndim != 1 or x.size != n_pairs:
+            raise ValueError(f"Expected vector of length {n_pairs}, got {x.shape}")
 
-    A contains:
-      - Case 1 geometry terms: (Fg_ac*Fg_bd + Fg_ad*Fg_bc) / (Fg_ab*Fg_cd)
-      - The leading '1' in Case 2 and Case 3 brackets
+        # Symmetric pair matrix X with X_ab = x_ab / F_ab for a != b.
+        X = np.zeros_like(F)
+        x_scaled = x / Fab
+        X[a_idx, b_idx] = x_scaled
+        X[b_idx, a_idx] = x_scaled
 
-    B contains:
-      - Case 2 geometry terms: (Pa/Pgw) ratio contributes one power of 1/r
-        since Pa ~ sigma^2 >> F*Pgw*gamma0 in this regime, so Pa/Pgw ~ sigma^2/Pgw = 1/r
+        # U = F X, S = F X F.
+        U = F @ X
+        S = U @ F
 
-    D contains:
-      - Case 3 diagonal terms: (Pa*Pb/Pgw^2) * 1/Fg_ab^2 ~ (1/r^2) / Fg_ab^2
+        diag_U = np.diag(U)
+        row_sum = np.bincount(a_idx, weights=x, minlength=F.shape[0])
+        row_sum += np.bincount(b_idx, weights=x, minlength=F.shape[0])
 
-    Returns: pairs array (N_pairs, 2), A, B, D matrices (N_pairs x N_pairs)
-    """
-    N     = gamma_matrix.shape[0]
-    pairs = np.array([(a, b) for a in range(N) for b in range(a+1, N)])
-    Np    = len(pairs)
+        y = (
+            S[a_idx, b_idx] / Fab
+            - diag_U[a_idx]
+            - diag_U[b_idx]
+            + row_sum[a_idx]
+            + row_sum[b_idx]
+            + (U[a_idx, b_idx] + U[b_idx, a_idx]) * (inv_r / Fab)
+            + x * (inv_r2 / (Fab * Fab))
+        )
+        return np.asarray(y, dtype=float)
 
-    Fg_pair = F_PHYS * gamma_matrix[pairs[:, 0], pairs[:, 1]]  # (Np,)
-    Fg_mat  = F_PHYS * gamma_matrix                              # (N, N)
+    return matvec
 
-    a_idx = pairs[:, 0];  b_idx = pairs[:, 1]
-    a_i = a_idx[:, None]; b_i = b_idx[:, None]
-    c_j = a_idx[None, :]; d_j = b_idx[None, :]
 
-    # Sharing masks
-    ac = (a_i == c_j);  bc = (b_i == c_j)
-    ad = (a_i == d_j);  bd = (b_i == d_j)
+# ============================================================
+#                 DENSE FALLBACK FOR SMALL N
+# ============================================================
 
-    case3    = ac & bd                           # same pair
-    case1    = ~ac & ~bc & ~ad & ~bd             # no shared stars
-    case2_ac = ac & ~bd & ~bc & ~ad              # shared star: a=c
-    case2_bc = bc & ~ac & ~bd & ~ad              # shared star: b=c
-    case2_ad = ad & ~ac & ~bd & ~bc              # shared star: a=d
-    case2_bd = bd & ~ac & ~ad & ~bc              # shared star: b=d
+def build_HD_matrices(gamma_matrix: np.ndarray):
+    """Original dense decomposition (kept for small problems only)."""
+    n_star = gamma_matrix.shape[0]
+    pairs = np.array([(a, b) for a in range(n_star) for b in range(a + 1, n_star)])
+    n_pairs = len(pairs)
 
-    Fg_ab = Fg_pair[:, None];  Fg_cd = Fg_pair[None, :]
-    Fg_ac = Fg_mat[a_i, c_j];  Fg_bd = Fg_mat[b_i, d_j]
-    Fg_ad = Fg_mat[a_i, d_j];  Fg_bc = Fg_mat[b_i, c_j]
+    Fg_pair = F_PHYS * gamma_matrix[pairs[:, 0], pairs[:, 1]]
+    Fg_mat = F_PHYS * gamma_matrix
 
-    # --- Matrix A ---
-    # Default 1 for Case 2 and Case 3; override with geometry for Case 1
-    A = np.ones((Np, Np))
-    with np.errstate(divide='ignore', invalid='ignore'):
+    a_idx = pairs[:, 0]
+    b_idx = pairs[:, 1]
+    a_i = a_idx[:, None]
+    b_i = b_idx[:, None]
+    c_j = a_idx[None, :]
+    d_j = b_idx[None, :]
+
+    ac = a_i == c_j
+    bc = b_i == c_j
+    ad = a_i == d_j
+    bd = b_i == d_j
+
+    case3 = ac & bd
+    case1 = ~ac & ~bc & ~ad & ~bd
+    case2_ac = ac & ~bd & ~bc & ~ad
+    case2_bc = bc & ~ac & ~bd & ~ad
+    case2_ad = ad & ~ac & ~bd & ~bc
+    case2_bd = bd & ~ac & ~ad & ~bc
+
+    Fg_ab = Fg_pair[:, None]
+    Fg_cd = Fg_pair[None, :]
+    Fg_ac = Fg_mat[a_i, c_j]
+    Fg_bd = Fg_mat[b_i, d_j]
+    Fg_ad = Fg_mat[a_i, d_j]
+    Fg_bc = Fg_mat[b_i, c_j]
+
+    A = np.ones((n_pairs, n_pairs), dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
         A_c1 = (Fg_ac * Fg_bd + Fg_ad * Fg_bc) / (Fg_ab * Fg_cd)
     A[case1] = A_c1[case1]
 
-    # --- Matrix B ---
-    # Case 2 only. Each sub-case identifies the shared and free stars.
-    # The free-star tilde-gammas appear in the ratio; Pa/Pgw ~ sigma^2/Pgw = 1/r.
-    B = np.zeros((Np, Np))
-    with np.errstate(divide='ignore', invalid='ignore'):
-        # c=a: shared star a; free stars are b (pair i) and d (pair j)
+    B = np.zeros((n_pairs, n_pairs), dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
         B[case2_ac] = (Fg_mat[b_i, d_j] / (Fg_ab * Fg_mat[a_i, d_j]))[case2_ac]
-        # c=b: shared star b; free stars are a and d
         B[case2_bc] = (Fg_mat[a_i, d_j] / (Fg_ab * Fg_mat[b_i, d_j]))[case2_bc]
-        # d=a: shared star a; free stars are b and c
         B[case2_ad] = (Fg_mat[b_i, c_j] / (Fg_ab * Fg_mat[a_i, c_j]))[case2_ad]
-        # d=b: shared star b; free stars are a and c
         B[case2_bd] = (Fg_mat[a_i, c_j] / (Fg_ab * Fg_mat[b_i, c_j]))[case2_bd]
 
-    # --- Matrix D ---
-    # Case 3 diagonal only: (Pa*Pb/Pgw^2) * 1/Fg_ab^2 ~ (1/r^2)/Fg_ab^2
-    D = np.zeros((Np, Np))
+    D = np.zeros((n_pairs, n_pairs), dtype=float)
     np.fill_diagonal(D, 1.0 / Fg_pair**2)
 
     return pairs, A, B, D
 
 
-# ============================================================
-#           FULL HD SNR VIA MATRIX PSEUDO-INVERSE
-# ============================================================
-
-def rho_hd_full_matrix(x_arr, gamma_matrix, svd_rcond=1e-10, verbose=True):
-    """
-    Full HD SNR curve including all three covariance Cases.
-
-    Builds the N_pairs x N_pairs matrix M(r) = A + B/r + D/r^2 for each r,
-    computes the symmetric eigendecomposition, and evaluates:
-
-        rho^2_HD = 2 * sum_{ab,cd} (M^+)_{ab,cd}
-                 = 2 * sum_k (1/lambda_k) * (sum_i V_{ik})^2
-
-    The pseudo-inverse truncates eigenvalues below svd_rcond * max|lambda|
-    to handle the negative eigenvalues that appear in the intermediate regime.
-
-    x_arr    : r = P_gw / sigma_bar^2 (same dimensionless x-axis as rho_cp_full)
-    svd_rcond: relative threshold for pseudo-inverse eigenvalue truncation
-    verbose  : print progress (recommended, each r-value takes ~30s for N=100)
-    """
+def rho_hd_full_matrix_dense(x_arr, gamma_matrix, svd_rcond=1e-10, verbose=True):
+    """Original dense eigendecomposition path."""
     if verbose:
         print("Building HD covariance matrices A, B, D...", flush=True)
     t0 = time.time()
     _, A, B, D = build_HD_matrices(gamma_matrix)
-    Np = A.shape[0]
+    n_pairs = A.shape[0]
     if verbose:
-        print(f"  Done ({time.time()-t0:.1f}s). Matrix: {Np}x{Np}, "
-              f"estimated total: {len(x_arr)*31/60:.0f} min", flush=True)
+        print(
+            f"  Done ({time.time()-t0:.1f}s). Matrix: {n_pairs}x{n_pairs}",
+            flush=True,
+        )
 
-    x_arr    = np.asarray(x_arr, dtype=float)
-    rho_vals = np.zeros(len(x_arr))
+    x_arr = np.asarray(x_arr, dtype=float)
+    rho_vals = np.zeros(len(x_arr), dtype=float)
 
     for k, r in enumerate(x_arr):
         if verbose:
-            print(f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  "
-                  f"({time.time()-t0:.0f}s elapsed)", flush=True)
+            print(
+                f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  ({time.time()-t0:.0f}s elapsed)",
+                flush=True,
+            )
 
         M = A + B / r + D / r**2
-
-        # Symmetric pseudo-inverse via eigendecomposition
         eigvals, eigvecs = np.linalg.eigh(M)
-        thresh    = svd_rcond * np.max(np.abs(eigvals))
-        inv_eigs  = np.where(np.abs(eigvals) > thresh, 1.0 / eigvals, 0.0)
+        thresh = svd_rcond * np.max(np.abs(eigvals))
+        inv_eigs = np.where(np.abs(eigvals) > thresh, 1.0 / eigvals, 0.0)
+        row_sums = eigvecs.sum(axis=0)
+        rho_sq = 2.0 * float(np.dot(inv_eigs, row_sums**2))
+        rho_vals[k] = np.sqrt(max(rho_sq, 0.0))
 
-        # Efficient sum of pseudo-inverse:
-        # sum_{ij}(M^+)_{ij} = sum_k (1/lambda_k) * (sum_i V_{ik})^2
-        row_sums  = eigvecs.sum(axis=0)
-        rho_sq    = 2.0 * float(np.dot(inv_eigs, row_sums**2))
+    return rho_vals
+
+
+# ============================================================
+#            FULL HD SNR VIA MATRIX-FREE SOLVER
+# ============================================================
+
+def rho_hd_full_matrix(
+    x_arr,
+    gamma_matrix,
+    svd_rcond=1e-10,
+    verbose=True,
+    dense_cutover_pairs: int = 3000,
+    maxiter: int | None = None,
+):
+    """Full HD SNR curve including all three covariance cases.
+
+    For small pair counts, this uses the original dense eigendecomposition.
+    For larger problems, it solves M(r) x = 1 with MINRES and a Jacobi
+    preconditioner, using the exact matrix-vector product above.
+
+    Parameters
+    ----------
+    x_arr : array_like
+        r = P_gw / sigma_bar^2 values.
+    gamma_matrix : ndarray
+        Geometry-dependent gamma matrix.
+    svd_rcond : float
+        Used as the relative tolerance for the iterative solver in the large-N
+        path, and as the eigenvalue cutoff in the dense fallback.
+    dense_cutover_pairs : int
+        Use the dense path only when N_pairs <= this threshold.
+    maxiter : int or None
+        Maximum MINRES iterations per r-value. None lets SciPy choose.
+    """
+    x_arr = np.asarray(x_arr, dtype=float)
+    data = build_hd_pair_data(gamma_matrix)
+
+    if data.n_pairs <= dense_cutover_pairs:
+        if verbose:
+            print(
+                f"Using dense fallback path (N_pairs={data.n_pairs} <= {dense_cutover_pairs})",
+                flush=True,
+            )
+        return rho_hd_full_matrix_dense(x_arr, gamma_matrix, svd_rcond=svd_rcond, verbose=verbose)
+
+    if verbose:
+        print("Building matrix-free HD operator...", flush=True)
+        print(
+            f"  N_stars={gamma_matrix.shape[0]}, N_pairs={data.n_pairs}",
+            flush=True,
+        )
+
+    rho_vals = np.zeros(len(x_arr), dtype=float)
+    t0 = time.time()
+
+    ones_rhs = np.ones(data.n_pairs, dtype=float)
+    x0 = None
+
+    for k, r in enumerate(x_arr):
+        if verbose:
+            print(
+                f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  ({time.time()-t0:.0f}s elapsed)",
+                flush=True,
+            )
+
+        matvec = make_hd_matvec(data, r)
+        Aop = LinearOperator((data.n_pairs, data.n_pairs), matvec=matvec, dtype=float)
+
+        # Diagonal of M(r): 1 + 1/(r^2 F_ab^2)
+        diag = 1.0 + 1.0 / (r * r * data.Fab * data.Fab)
+        inv_diag = 1.0 / diag
+        Mop = LinearOperator(
+            (data.n_pairs, data.n_pairs),
+            matvec=lambda v, inv_diag=inv_diag: inv_diag * np.asarray(v, dtype=float),
+            dtype=float,
+        )
+
+        # MINRES is usually the fastest option for this symmetric system,
+        # but some full-sky configurations can be noticeably more ill-conditioned.
+        # We therefore try progressively looser solves and warm-start each solve
+        # from the previous r-value when available.
+        base_maxiter = 2000 if maxiter is None else int(maxiter)
+        minres_trials = [
+            (svd_rcond, base_maxiter),
+            (max(svd_rcond * 10.0, 1e-8), max(base_maxiter * 2, 4000)),
+            (max(svd_rcond * 100.0, 1e-7), max(base_maxiter * 5, 10000)),
+        ]
+
+        sol = None
+        info = None
+        last_tol = None
+        last_maxiter = None
+
+        for tol, trial_maxiter in minres_trials:
+            last_tol = tol
+            last_maxiter = trial_maxiter
+            kwargs = _iterative_tol_kwargs(minres, tol)
+            minres_kwargs = dict(M=Mop, maxiter=trial_maxiter, **kwargs)
+            if x0 is not None:
+                minres_kwargs["x0"] = x0
+            sol, info = minres(Aop, ones_rhs, **minres_kwargs)
+            if info == 0:
+                break
+
+        if info != 0:
+            # GMRES is less memory-frugal than MINRES, but it is a useful
+            # fallback when the symmetric iteration struggles at a few r values.
+            gmres_restart = min(200, data.n_pairs)
+            gmres_maxiter = max(100, base_maxiter)
+            gmres_tol = last_tol if last_tol is not None else svd_rcond
+            gmres_kwargs = _iterative_tol_kwargs(gmres, gmres_tol)
+            gmres_call = dict(M=Mop, restart=gmres_restart, maxiter=gmres_maxiter, **gmres_kwargs)
+            if x0 is not None:
+                gmres_call["x0"] = x0
+            sol, info = gmres(Aop, ones_rhs, **gmres_call)
+
+        if info != 0:
+            raise RuntimeError(
+                f"Iterative solver did not converge for r={r:.3e} (info={info}). "
+                f"Last MINRES tol={last_tol:.1e}, maxiter={last_maxiter}."
+            )
+
+        x0 = sol
+        rho_sq = 2.0 * float(np.sum(sol))
         rho_vals[k] = np.sqrt(max(rho_sq, 0.0))
 
     return rho_vals
@@ -191,29 +379,34 @@ def rho_hd_full_matrix(x_arr, gamma_matrix, svd_rcond=1e-10, verbose=True):
 #                          PLOT
 # ============================================================
 
-def plot_full_comparison(gamma_matrix, ell_min, ell_max, n_r=30,
-                         save_path=None):
-    """
-    Plot CP (full curve) and HD (full matrix) SNR on the same axes.
-    Uses a coarse r grid appropriate for the ~30s/point runtime.
-    """
-    r_values = np.logspace(-6, 2, n_r)
+def plot_full_comparison(gamma_matrix, ell_min, ell_max, n_r=30, save_path=None):
+    """Plot CP and HD SNR on the same axes."""
+    r_values = np.logspace(-13, 2, n_r)
 
     print("Computing CP full curve...", flush=True)
     rho_cp = rho_cp_full(r_values, ell_min, ell_max)
 
-    print("\nComputing HD full matrix curve...", flush=True)
+    print("\nComputing HD full curve...", flush=True)
     rho_hd = rho_hd_full_matrix(r_values, gamma_matrix, verbose=True)
 
+    print(f"\nPhysical r = P_gw/P_n = {PHYSICAL_RATIO:.3e}")
+
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.loglog(r_values, rho_cp, color='C0', lw=2.5, label=r'$\rho_{\rm CP}$')
-    ax.loglog(r_values, rho_hd, color='C1', lw=2.5,
-              label=r'$\rho_{\rm HD}$ (full matrix, all Cases)')
-    ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n(f_l)$', fontsize=13)
-    ax.set_ylabel(r'$\rho$',                           fontsize=13)
-    ax.set_title('CP and HD SNR — Full Covariance Matrix', fontsize=13)
+    ax.loglog(r_values, rho_cp, color="C0", lw=2.5, label=r"$\rho_{\rm CP}$")
+    ax.loglog(
+        r_values,
+        rho_hd,
+        color="C1",
+        lw=2.5,
+        label=r"$\rho_{\rm HD}$",
+    )
+    ax.axvline(PHYSICAL_RATIO, color="k", lw=1.2, ls="--", label=rf"physical $r = {PHYSICAL_RATIO:.1e}$")
+
+    ax.set_xlabel(r"$P_{\rm gw}(f_l)\,/\,P_n(f_l)$", fontsize=13)
+    ax.set_ylabel(r"$\rho$", fontsize=13)
+    ax.set_title("CP and HD Full SNR", fontsize=13)
     ax.legend(fontsize=11)
-    ax.grid(True, which='both', alpha=0.3)
+    ax.grid(True, which="both", alpha=0.3)
     plt.tight_layout()
 
     if save_path:
@@ -229,21 +422,22 @@ def plot_full_comparison(gamma_matrix, ell_min, ell_max, n_r=30,
 #                        ENTRY POINT
 # ============================================================
 
-if __name__ == '__main__':
-    stars_deg        = build_star_positions(STAR_COORDS_DEG, N_STARS,
-                                            FIELD_SIZE_DEG, RANDOM_SEED)
-    theta_mat        = pairwise_theta(stars_deg)
+if __name__ == "__main__":
+    stars_deg = build_star_positions(STAR_COORDS_DEG, N_STARS, FIELD_SIZE_DEG, RANDOM_SEED)
+    theta_mat = pairwise_theta(stars_deg)
     ell_min, ell_max = compute_ell_limits(theta_mat, FIELD_SIZE_DEG)
 
     print(f"ell_min={ell_min}, ell_max={ell_max}, N_stars={N_STARS}")
-    print(f"N_pairs = {N_STARS*(N_STARS-1)//2}")
+    print(f"N_pairs = {N_STARS * (N_STARS - 1) // 2}")
 
     gamma = gamma_parallel(theta_mat, ell_min, ell_max)
 
     r_vals, rho_cp, rho_hd = plot_full_comparison(
-        gamma, ell_min, ell_max,
+        gamma,
+        ell_min,
+        ell_max,
         n_r=30,
-        save_path="hd_full_matrix_snr.png"
+        save_path="hd_full_matrix_snr_fast.png",
     )
 
     print("\nSelected output:")

@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import astropy.units as u
+from astropy.coordinates import SkyCoord
 
 
 # ============================================================
@@ -31,8 +32,8 @@ A_gw = 1e-15
 sigma_bar_sq = P_n
 
 # Field parameters
-FIELD_SIZE_DEG = 100
-N_STARS        = 300
+FIELD_SIZE_DEG = 360.0
+N_STARS        = 100
 STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
 
@@ -53,22 +54,34 @@ PHYSICAL_RATIO = P_gw_fl / P_n
 
 def build_star_positions(star_coords_deg=None, n_stars=N_STARS,
                          field_size_deg=FIELD_SIZE_DEG, seed=RANDOM_SEED):
+    """Build full-sky star positions as [RA, Dec] in degrees.
+
+    If star_coords_deg is provided, it is returned as-is after validation.
+    Otherwise stars are drawn uniformly on the sphere: RA uniform in
+    [0, 360), and sin(Dec) uniform in [-1, 1]. The field_size_deg argument is
+    retained for backward compatibility but is ignored in full-sky mode.
+    """
     if star_coords_deg is not None:
         stars = np.asarray(star_coords_deg, dtype=float)
         if stars.ndim != 2 or stars.shape[1] != 2:
             raise ValueError('star_coords_deg must have shape (N, 2).')
         return stars
+
     rng = np.random.default_rng(seed)
-    half = field_size_deg / 2.0
-    return rng.uniform(-half, half, size=(n_stars, 2))
+    ra_deg = rng.uniform(0.0, 360.0, size=n_stars)
+    sin_dec = rng.uniform(-1.0, 1.0, size=n_stars)
+    dec_deg = np.degrees(np.arcsin(sin_dec))
+    return np.column_stack((ra_deg, dec_deg))
 
 
 def pairwise_theta(stars_deg):
-    """Flat-sky pairwise angular separations in radians."""
-    stars_rad = np.deg2rad(stars_deg)
-    dx = stars_rad[:, 0][:, None] - stars_rad[:, 0][None, :]
-    dy = stars_rad[:, 1][:, None] - stars_rad[:, 1][None, :]
-    theta = np.sqrt(dx**2 + dy**2)
+    """Full-sky pairwise angular separations in radians."""
+    stars_deg = np.asarray(stars_deg, dtype=float)
+    if stars_deg.ndim != 2 or stars_deg.shape[1] != 2:
+        raise ValueError('stars_deg must have shape (N, 2).')
+
+    coords = SkyCoord(ra=stars_deg[:, 0] * u.deg, dec=stars_deg[:, 1] * u.deg, frame='icrs')
+    theta = coords[:, None].separation(coords[None, :]).rad
     np.fill_diagonal(theta, np.nan)
     return theta
 
@@ -395,7 +408,6 @@ def main():
 
     ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n(f_l)$', fontsize=13)
     ax.set_ylabel(r'$\rho$',                           fontsize=13)
-    ax.set_ylim(1e-11, 1e3)
     ax.set_title('CP and HD SNR Full Curves',          fontsize=13)
     ax.legend(fontsize=10)
     ax.grid(True, which='both', alpha=0.3)
@@ -432,7 +444,6 @@ def plot_full_snr(gamma_matrix, ell_min, ell_max):
 
     ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n(f_l)$', fontsize=13)
     ax.set_ylabel(r'$\rho$',                           fontsize=13)
-    ax.set_ylim(1e-2, 1e3)
     ax.set_title('Full SNR Curve: Common Process',     fontsize=13)
     ax.legend(fontsize=10)
     ax.grid(alpha=0.3)

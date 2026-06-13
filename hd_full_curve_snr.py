@@ -40,6 +40,7 @@ from main import (
     RANDOM_SEED,
     P_n,
     sigma_bar_sq,
+    PHYSICAL_RATIO,
 )
 
 EPS          = 1e-14
@@ -73,10 +74,7 @@ def rho_hd_intermediate(gammas):
       rho^2_ab -> 2*(F*g)^2 / ((F*g)^2 + 1)  (Pgw^2 cancels)
 
     This is a pure geometric number, independent of r.
-
-    For F*g << 1 (typical for a 10-degree field, where g ~ 1e-5 and F*g ~ 0.06):
-      rho^2_ab ~ 2*(F*g)^2  -- the plateau is numerically close to the
-      weak-signal value at r=1, not a large number.
+    For F*g >> 1: each term -> 2, so plateau -> sqrt(2*N_pairs) = sqrt(N*(N-1)).
     """
     F  = ASTRO_FACTOR
     Fg = F * gammas
@@ -90,14 +88,18 @@ def rho_hd_intermediate(gammas):
 
 def plot_full_curve(gamma_matrix, n_r=400, save_path=None):
     """
-    Sweep r = P_gw/P_n and plot rho_HD with asymptotes.
+    Sweep r = P_gw/P_n over a fixed range and plot rho_HD with asymptotes.
+
+    The sweep [1e-13, 1e2] is fixed so the physical operating point
+    (PHYSICAL_RATIO ~ 6e-11) and both transitions arise naturally.
     """
     vals   = gamma_matrix[np.triu_indices_from(gamma_matrix, k=1)]
     gammas = vals[np.isfinite(vals) & (np.abs(vals) > EPS)]
     Np     = len(gammas)
     print(f"N_pairs used: {Np}")
 
-    r_values = np.logspace(-6, 2, n_r)
+    # Fixed sweep — physical ratio and transitions arise naturally
+    r_values = np.logspace(-13, 2, n_r)
 
     print(f"Computing rho_HD for {n_r} r values ...")
     rho_full = rho_hd_full(r_values, gamma_matrix)
@@ -109,10 +111,11 @@ def plot_full_curve(gamma_matrix, n_r=400, save_path=None):
 
     F = ASTRO_FACTOR
     sum_gamma2 = float(np.sum(gammas**2))
-    print(f"\nsum gamma_ab^2                       = {sum_gamma2:.4e}")
-    print(f"F^2 * sum gamma_ab^2                  = {F**2 * sum_gamma2:.4e}")
-    print(f"Weak-signal prefactor sqrt(2)*F*sqrt(sum) = {np.sqrt(2.0)*F*np.sqrt(sum_gamma2):.4f}")
-    print(f"Intermediate plateau rho_int          = {rho_int_val:.4f}")
+    print(f"\nsum gamma_ab^2                            = {sum_gamma2:.4e}")
+    print(f"F^2 * sum gamma_ab^2                       = {F**2 * sum_gamma2:.4e}")
+    print(f"Weak-signal prefactor sqrt(2)*F*sqrt(sum)  = {np.sqrt(2.0)*F*np.sqrt(sum_gamma2):.4f}")
+    print(f"Intermediate plateau rho_int               = {rho_int_val:.4f}")
+    print(f"Physical r = P_gw/P_n                      = {PHYSICAL_RATIO:.3e}")
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -123,7 +126,9 @@ def plot_full_curve(gamma_matrix, n_r=400, save_path=None):
               label=r'weak-signal asymptote')
     ax.loglog(r_values, rho_int_line,
               color='coral', lw=1.5, ls=':',
-              label=r'intermediate plateau')
+              label=f'intermediate plateau ({rho_int_val:.2f})')
+    ax.axvline(PHYSICAL_RATIO, color='k', lw=1.2, ls='--',
+               label=rf'physical $r = {PHYSICAL_RATIO:.1e}$')
 
     ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n(f_l)$', fontsize=13)
     ax.set_ylabel(r'$\rho_{\rm HD}$',                 fontsize=13)
