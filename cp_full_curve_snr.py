@@ -54,8 +54,7 @@ def plot_full_curve(ell_min, ell_max, n_r=400, save_path=None):
     """
     Sweep r = P_gw/P_n over a fixed range and plot rho_CP with asymptotes.
 
-    The x range [1e-13, 1e2] is fixed so the physical operating point
-    and both transitions arise naturally without being manufactured.
+    The x range [1e-13, 1e2] is fixed.
     """
     gamma0   = cp_single_star_gamma(ell_min, ell_max)
     rho_plat = rho_cp_intermediate(gamma0)

@@ -1,7 +1,7 @@
 """
-hd_full_curve_snr.py
+hd_curve_case3approx_snr.py
 ====================
-Plots the full-curve HD SNR vs r = P_gw(f_l)/P_n.
+Plots the full-curve HD SNR with Case 3 approximation vs r = P_gw(f_l)/P_n.
 
 Uses the pair-by-pair diagonal approximation of C^{-1}.
 
@@ -90,8 +90,7 @@ def plot_full_curve(gamma_matrix, n_r=400, save_path=None):
     """
     Sweep r = P_gw/P_n over a fixed range and plot rho_HD with asymptotes.
 
-    The sweep [1e-13, 1e2] is fixed so the physical operating point
-    (PHYSICAL_RATIO ~ 6e-11) and both transitions arise naturally.
+    The sweep [1e-13, 1e2] is fixed.
     """
     vals   = gamma_matrix[np.triu_indices_from(gamma_matrix, k=1)]
     gammas = vals[np.isfinite(vals) & (np.abs(vals) > EPS)]
@@ -162,7 +161,7 @@ if __name__ == '__main__':
     gamma = gamma_parallel(theta_mat, ell_min, ell_max)
 
     r_vals, rho_vals = plot_full_curve(gamma, n_r=400,
-                                       save_path="hd_full_curve_snr.png")
+                                       save_path="hd_curve_case3approx_snr.png")
 
     print("\nSelected output (r, rho_HD):")
     for rv, rhov in zip(r_vals[::80], rho_vals[::80]):

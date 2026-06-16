@@ -5,7 +5,7 @@ Plots CP and HD SNR curves on the same axes vs P_gw(f_l)/P_n.
 
 Uses the formulas already in main.py:
   - rho_cp_full: full CP curve via Sherman-Morrison (smooth, exact)
-  - rho_hd_full: full HD curve summing pair-by-pair (smooth, diagonal approx of C^{-1})
+  - rho_hd_full: full HD Case 3 approximation curve summing pair-by-pair (smooth, diagonal approx of C^{-1})
 
 Both use the same x-axis: r = P_gw(f_l) / P_n.
 """

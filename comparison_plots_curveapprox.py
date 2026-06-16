@@ -1,7 +1,7 @@
 """
 comparison_plots.py
 ===================
-Produces two sets of comparison plots for advisor presentation:
+Produces two sets of comparison plots (USES CASE 3 APPROXIMATION FOR HD):
 
   Plot set 1 — N_stars sweep (fixed 10-degree field):
     (a) rho_CP for N = 50, 100, 250, 500, 1000   [fast: no gamma recomputation]
@@ -340,7 +340,7 @@ def plot_combined_field_sweep(field_sizes_deg, n_stars=100, save_path=None):
 if __name__ == '__main__':
 
     # ── N sweep settings ─────────────────────────────────────
-    # N=1000 is commented out — enable if you have time (~10+ min for HD)
+    # N=1000 is commented out — enable if time/storage (~10+ min for HD)
     N_VALUES = [50, 100, 250, 500]
     # N_VALUES = [50, 100, 250, 500, 1000]  # uncomment to include N=1000
 

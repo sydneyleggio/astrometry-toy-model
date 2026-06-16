@@ -1,20 +1,8 @@
 """
-Matrix-free version of the full HD SNR calculation.
+hd_full_matrix_snr.py
+====================
+Plots the full-curve HD SNR vs r = P_gw(f_l)/P_n using an exact matrix-free solver for the full covariance.
 
-What changed relative to the original script:
-- No dense N_pairs x N_pairs covariance matrices are materialized for large problems.
-- The action of M(r) on a vector is computed exactly using N x N matrix products.
-- For large pair counts, the quadratic form is recovered with a preconditioned
-  MINRES solve instead of a full eigendecomposition.
-- A dense fallback is kept for small problems so the results can still be
-  checked against the original approach.
-
-Important note:
-- This keeps the same covariance algebra, but the large-N path solves
-  M(r) x = 1 iteratively to avoid the prohibitive memory cost of the full
-  pair-pair matrix.
-- The matrix-vector product is exact; the only approximation is the linear
-  solver tolerance.
 """
 
 from __future__ import annotations
@@ -217,7 +205,7 @@ def build_HD_matrices(gamma_matrix: np.ndarray):
 def rho_hd_full_matrix_dense(x_arr, gamma_matrix, svd_rcond=1e-10, verbose=True):
     """Original dense eigendecomposition path."""
     if verbose:
-        print("Building HD covariance matrices A, B, D...", flush=True)
+        print("Building HD covariance matrices A, B, C, D...", flush=True)
     t0 = time.time()
     _, A, B, D = build_HD_matrices(gamma_matrix)
     n_pairs = A.shape[0]
@@ -323,10 +311,6 @@ def rho_hd_full_matrix(
             dtype=float,
         )
 
-        # MINRES is usually the fastest option for this symmetric system,
-        # but some full-sky configurations can be noticeably more ill-conditioned.
-        # We therefore try progressively looser solves and warm-start each solve
-        # from the previous r-value when available.
         base_maxiter = 2000 if maxiter is None else int(maxiter)
         minres_trials = [
             (svd_rcond, base_maxiter),
@@ -374,12 +358,71 @@ def rho_hd_full_matrix(
 
     return rho_vals
 
+def print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, n_stars=N_STARS):
+    """
+    Print weak/strong-signal slopes and plateau values for CP and HD curves.
+
+    Slopes computed via log-log linear regression over designated windows.
+    CP plateau is analytic (1/gamma0); HD plateau is numeric only, since the
+    full-matrix formulation has no simple closed form like the diagonal approx.
+    """
+    from main import cp_single_star_gamma
+
+    gamma0   = cp_single_star_gamma(ell_min, ell_max)
+    n_pairs  = n_stars * (n_stars - 1) // 2
+
+    log_r      = np.log10(r_values)
+    log_rho_cp = np.log10(np.maximum(rho_cp, 1e-300))
+    log_rho_hd = np.log10(np.maximum(rho_hd, 1e-300))
+
+    def slope_in_window(log_x, log_y, x_lo, x_hi, label):
+        mask = (10**log_x >= x_lo) & (10**log_x <= x_hi)
+        if mask.sum() < 2:
+            print(f'  WARNING: fewer than 2 points in {label} window [{x_lo:.0e}, {x_hi:.0e}] — '
+                  f'try increasing n_r in plot_full_comparison.')
+            return float('nan')
+        return float(np.polyfit(log_x[mask], log_y[mask], 1)[0])
+
+    # Weak-signal window: well below the physical ratio (~6e-11)
+    slope_cp_weak = slope_in_window(log_r, log_rho_cp, 1e-13, 1e-11, 'CP weak')
+    slope_hd_weak = slope_in_window(log_r, log_rho_hd, 1e-13, 1e-11, 'HD weak')
+
+    # Strong-signal window: deep in saturation
+    slope_cp_strong = slope_in_window(log_r, log_rho_cp, 1e-2, 1e1, 'CP strong')
+    slope_hd_strong = slope_in_window(log_r, log_rho_hd, 1e-2, 1e1, 'HD strong')
+
+    # CP plateau: analytic = 1/gamma0
+    cp_plateau_anal = 1.0 / max(abs(gamma0), EPS)
+    cp_plateau_num  = float(np.max(rho_cp))
+
+    # HD plateau: no simple closed form for the full-matrix case.
+    # The diagonal-approx analytic value sqrt(N*(N-1)) is printed as a reference,
+    # but the full-matrix result will generally differ.
+    hd_plateau_anal_diag = np.sqrt(n_stars * (n_stars - 1))
+    hd_plateau_num       = float(np.max(rho_hd))
+
+    print('\n' + '='*60)
+    print('              SNR CURVE DIAGNOSTICS (full matrix)')
+    print('='*60)
+
+    print('\n── Common Process (CP) ──')
+    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_cp_weak:+.3f}  (expect +1.0)')
+    print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_cp_strong:+.3f}  (expect ~0)')
+    print(f'  Plateau [analytic]  = 1/gamma0             = {cp_plateau_anal:.4f}')
+    print(f'  Plateau [numeric ]  = max(rho_CP)          = {cp_plateau_num:.4f}')
+
+    print('\n── Hellings-Downs (HD) — full covariance matrix ──')
+    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_hd_weak:+.3f}  (expect +1.0)')
+    print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_hd_strong:+.3f}  (expect ~0)')
+    print(f'  Plateau [numeric ]  = max(rho_HD)          = {hd_plateau_num:.4f}')
+    print('='*60 + '\n')
+
 
 # ============================================================
 #                          PLOT
 # ============================================================
 
-def plot_full_comparison(gamma_matrix, ell_min, ell_max, n_r=30, save_path=None):
+def plot_full_comparison(gamma_matrix, ell_min, ell_max, n_r=60, save_path=None):
     """Plot CP and HD SNR on the same axes."""
     r_values = np.logspace(-13, 2, n_r)
 
@@ -390,6 +433,8 @@ def plot_full_comparison(gamma_matrix, ell_min, ell_max, n_r=30, save_path=None)
     rho_hd = rho_hd_full_matrix(r_values, gamma_matrix, verbose=True)
 
     print(f"\nPhysical r = P_gw/P_n = {PHYSICAL_RATIO:.3e}")
+    print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, n_stars=gamma_matrix.shape[0])
+
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.loglog(r_values, rho_cp, color="C0", lw=2.5, label=r"$\rho_{\rm CP}$")

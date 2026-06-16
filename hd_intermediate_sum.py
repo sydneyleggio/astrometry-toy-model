@@ -1,21 +1,17 @@
 """
 hd_intermediate_snr.py
 ======================
-Computes the intermediate-regime HD SNR using Romano eq. 20:
+Computes the intermediate-regime HD SNR:
 
     rho^2_HD = (A_bar^2_gw)^2 * sum_{ab,cd} (C^{-1})_{ab,cd}
              = 2 * 1^T M^{-1} 1
 
 where M = C / [(1/2)(A_bar^2_gw)^2].
 
-All formulas use F_ab = 192*pi^3 * tilde_Gamma''_0(Theta_ab), which is
-the quantity tilde_F''_ab defined in the derivation notes (page 1).
-F_ab is the astrometric analog of Romano's chi_ab, with 192*pi^3 absorbed.
-
 P_a(f) = P_na + P_gw = sigma_bar^2 + P_gw
 
 In the intermediate regime P_gw >> P_na, so P_a/P_gw -> 1, and the
-three M matrix cases (from the full derivation, pages 2-7) become:
+three M matrix cases become:
 
   Case 1 (no shared stars):
       M = (F_ac*F_bd + F_ad*F_bc) / (F_ab * F_cd)

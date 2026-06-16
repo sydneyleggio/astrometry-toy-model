@@ -9,10 +9,6 @@ The sum is truncated at ℓ_min = 2 and ℓ_max = floor(2π / Θ_min),
 where Θ_min is the MINIMUM pairwise angular separation in the catalogue
 (sets the resolution limit of the survey).
 
-Note: if two stars happen to be extremely close (Θ_min ≪ 1°),
-ℓ_max can become very large and computation slow. Use the theta_min_floor_deg
-parameter to cap this (e.g. set it to your instrument's resolution limit).
-
 Usage
 -----
 1. Random catalogue (demo):

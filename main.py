@@ -32,7 +32,7 @@ sigma_bar_sq = P_n
 
 # Field parameters
 FIELD_SIZE_DEG = 100
-N_STARS        = 300
+N_STARS        = 400
 STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
 
@@ -204,13 +204,6 @@ def gamma_parallel_matrix(theta_matrix, ell_min, ell_max, batch_size=5000):
     unique pairs in batches rather than passing the full N x N array to
     compute_legendre_recurrence at once.
 
-    The direct approach allocates arrays of shape (ell_max+1, N, N), which
-    reaches ~5 GB for N=500. This function instead processes `batch_size`
-    unique pairs at a time, keeping peak memory at O(ell_max * batch_size).
-
-    Memory estimate: 3 * (ell_max+1) * batch_size * 8 bytes
-      batch_size=5000, ell_max=800: ~96 MB peak — safe for any laptop.
-
     Returns the full symmetric N x N gamma matrix (NaN on diagonal,
     consistent with the output of gamma_parallel called on the full matrix).
     """
@@ -238,27 +231,13 @@ def gamma_parallel_matrix(theta_matrix, ell_min, ell_max, batch_size=5000):
 # ============================================================
 #     SNR CALCULATIONS
 #
-#  CONCEPTUAL STRUCTURE (Romano et al. 2020):
-#
 #  Common Process (CP):
 #    - Estimator: one per STAR (auto-correlation); covariance is N x N.
 #    - Sherman-Morrison inversion uses gamma0 = Gamma_o(0).
-#    - After normalising by (P_n/F)^2, formula depends only on r = P_gw/P_n:
-#        rho^2_CP = N*(F*r)^2 / [1 + 2*F*gamma0*r + N*(F*gamma0*r)^2]
-#    - Plateau (intermediate regime): rho_CP -> 1/gamma0  (independent of N)
-#    - Weak-signal slope: rho_CP ~ sqrt(N)*F*r
 #
 #  Hellings-and-Downs (HD):
 #    - Estimator: one per PAIR (a<b) (cross-correlation); covariance is
 #      N_pairs x N_pairs.
-#    - Diagonal (Case 3) approximation used here. From Romano eq 37:
-#        rho^2_HD = sum_{a<b} 2*Pgw^2*(F*g_ab)^2
-#                              / [(Pgw*F*g_ab)^2 + (Pgw + sigma^2)^2]
-#    - Plateau (intermediate regime, F*g >> 1):
-#        rho_HD -> sqrt(N*(N-1)) ~ N
-#    - Weak-signal slope: rho_HD ~ sqrt(2)*F*sqrt(sum g_ab^2) * r
-#
-#  F = 192*pi^3 applied explicitly; all gamma values are raw Gamma_o output.
 # ============================================================
 
 def rho_cp_weak(x, n_stars=N_STARS):
@@ -338,6 +317,63 @@ def rho_hd_full(x_arr, gamma_matrix):
     rho_sq = np.sum(numer / denom, axis=1)
     return np.sqrt(np.maximum(rho_sq, 0.0))
 
+def print_snr_diagnostics(x_arr, rho_cp, rho_hd, ell_min, ell_max, n_stars=N_STARS):
+    """
+    Print weak-signal slopes and plateau values for both CP and HD SNR curves.
+
+    Slope is computed in log-log space via finite differences over a
+    designated 'weak signal' window well below the physical operating point.
+    Plateau is read both analytically and numerically (max of each curve).
+    """
+    gamma0    = cp_single_star_gamma(ell_min, ell_max)
+    log_x     = np.log10(x_arr)
+    log_rho_cp = np.log10(np.maximum(rho_cp, 1e-300))
+    log_rho_hd = np.log10(np.maximum(rho_hd, 1e-300))
+
+    # ── Weak-signal slope window: pick indices in x ~ [1e-12, 1e-10] ──
+    # This sits well below the physical ratio (~6e-11) and below any plateau.
+    weak_mask = (x_arr >= 1e-12) & (x_arr <= 1e-10)
+    if weak_mask.sum() >= 2:
+        slope_cp_weak = np.polyfit(log_x[weak_mask], log_rho_cp[weak_mask], 1)[0]
+        slope_hd_weak = np.polyfit(log_x[weak_mask], log_rho_hd[weak_mask], 1)[0]
+    else:
+        slope_cp_weak = slope_hd_weak = float('nan')
+
+    # ── Strong-signal slope window: pick indices in x ~ [1e-2, 1e1] ──
+    # Both curves should be saturating here; slope -> 0 at a true plateau.
+    strong_mask = (x_arr >= 1e-2) & (x_arr <= 1e1)
+    if strong_mask.sum() >= 2:
+        slope_cp_strong = np.polyfit(log_x[strong_mask], log_rho_cp[strong_mask], 1)[0]
+        slope_hd_strong = np.polyfit(log_x[strong_mask], log_rho_hd[strong_mask], 1)[0]
+    else:
+        slope_cp_strong = slope_hd_strong = float('nan')
+
+    # ── Analytical plateaus ──
+    n_pairs          = n_stars * (n_stars - 1) // 2
+    cp_plateau_anal  = 1.0 / max(abs(gamma0), EPS)           # = 1/gamma0
+    hd_plateau_anal  = np.sqrt(n_stars * (n_stars - 1))      # = sqrt(N*(N-1))
+
+    # ── Numerical plateaus: max of each curve ──
+    cp_plateau_num = float(np.max(rho_cp))
+    hd_plateau_num = float(np.max(rho_hd))
+
+    print('\n' + '='*55)
+    print('          SNR CURVE DIAGNOSTICS')
+    print('='*55)
+
+    print('\n── Common Process (CP) ──')
+    print(f'  Weak-signal slope   (x ~ 1e-12 to 1e-10):  {slope_cp_weak:+.3f}  (expect +1.0)')
+    print(f'  Strong-signal slope (x ~ 1e-2  to 1e+1 ):  {slope_cp_strong:+.3f}  (expect ~0)')
+    print(f'  Plateau  [analytic] = 1/gamma0            = {cp_plateau_anal:.4f}')
+    print(f'  Plateau  [numeric ] = max(rho_CP)         = {cp_plateau_num:.4f}')
+
+    print('\n── Hellings-Downs (HD) ──')
+    print(f'  Weak-signal slope   (x ~ 1e-12 to 1e-10):  {slope_hd_weak:+.3f}  (expect +1.0)')
+    print(f'  Strong-signal slope (x ~ 1e-2  to 1e+1 ):  {slope_hd_strong:+.3f}  (expect ~0)')
+    print(f'  Plateau  [analytic] = sqrt(N*(N-1))       = {hd_plateau_anal:.4f}  ({n_pairs} pairs)')
+    print(f'  Plateau  [numeric ] = max(rho_HD)         = {hd_plateau_num:.4f}')
+    print('='*55 + '\n')
+
 
 # ============================================================
 #                        MAIN
@@ -374,14 +410,16 @@ def main():
 
     # ── Fixed sweep: covers the physical operating point AND both plateaus ──
     # PHYSICAL_RATIO ~ 6e-11 sits deep in the weak-signal regime.
-    # The transition for CP is at r* ~ 1/(sqrt(N)*F*gamma0).
-    # Starting at 1e-13 ensures the physical ratio is visible; ending at 1e2
-    # ensures both plateaus are fully resolved.
     x_arr = np.logspace(-13, 2, 400)
 
     print('\nComputing full curves...')
     rho_cp = rho_cp_full(x_arr, ell_min, ell_max)
     rho_hd = rho_hd_full(x_arr, gamma)
+    print('Done.')
+
+    rho_cp = rho_cp_full(x_arr, ell_min, ell_max)
+    rho_hd = rho_hd_full(x_arr, gamma)
+    print_snr_diagnostics(x_arr, rho_cp, rho_hd, ell_min, ell_max, n_stars=len(stars_deg))  # add this
     print('Done.')
 
     fig, ax = plt.subplots(figsize=(9, 5))

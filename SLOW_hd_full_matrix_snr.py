@@ -132,7 +132,7 @@ def rho_hd_full_matrix(x_arr, gamma_matrix, svd_rcond=1e-10, verbose=True):
     verbose  : print progress (each r-value takes ~30s for N=100)
     """
     if verbose:
-        print("Building HD covariance matrices A, B, D...", flush=True)
+        print("Building HD covariance matrices A, B, C, D...", flush=True)
     t0 = time.time()
     _, A, B, D = build_HD_matrices(gamma_matrix)
     Np = A.shape[0]

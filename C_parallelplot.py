@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import astropy.units as u
 
 # ============================================================
-#                     CONSTANTS  (from main.py)
+#                     CONSTANTS 
 # ============================================================
 sigma_rad     = (1  * u.mas).to(u.rad).value
 dt_seconds    = (30 * u.min).to(u.s).value
@@ -20,50 +20,50 @@ N_THETA = 1000    # number of Theta sample points in [0, pi]
 
 
 # ============================================================
-#  SPECTRAL QUANTITIES  — Eqs (6) and (11)
+#  SPECTRAL QUANTITIES 
 # ============================================================
 
 def P_gw(f):
-    """GW power spectrum  [Eq. (6)]."""
+    """GW power spectrum."""
     return (A_gw**2 / (12.0 * np.pi**2)) * (f / f_yr)**(2 * alpha) * f**(-1)
 
 
 def S_h(f):
-    """One-sided strain PSD  [Eq. (11)]:  S_h = 12 pi^2 P_gw(f)."""
+    """One-sided strain PSD:  S_h = 12 pi^2 P_gw(f)."""
     return 12.0 * np.pi**2 * P_gw(f)
 
 
 # ============================================================
-#  MODE-COUPLING COEFFICIENT  — Eqs (3)–(5)
+#  MODE-COUPLING COEFFICIENT
 # ============================================================
 
 def F_sq(ell):
     """
     |F_ell^E|^2 = |F_ell^B|^2 = 1 / ( N_ell^2 * ell*(ell+1) )
     N_ell^2 = (ell+2)(ell+1)ell(ell-1) / 2
-    Cross terms vanish  [Eq. (5)].
+    Cross terms vanish.
     """
     N_sq = (ell + 2.0) * (ell + 1.0) * ell * (ell - 1.0) / 2.0
     return 1.0 / (N_sq * ell * (ell + 1.0))
 
 
 # ============================================================
-#  ANGULAR POWER SPECTRA  — Eqs (8) and (9)
+#  ANGULAR POWER SPECTRA
 # ============================================================
 
 def C_EE(ell, f):
-    """C_ell^EE = 16 pi |F_ell^E|^2 S_h(f)  [Eq. (8)]."""
+    """C_ell^EE = 16 pi |F_ell^E|^2 S_h(f)."""
     return 16.0 * np.pi * F_sq(ell) * S_h(f)
 
 
 def C_BB(ell, f):
-    """C_ell^BB = 16 pi |F_ell^B|^2 S_h(f)  [Eq. (9)].
+    """C_ell^BB = 16 pi |F_ell^B|^2 S_h(f).
     For an isotropic background C_BB = C_EE."""
     return 16.0 * np.pi * F_sq(ell) * S_h(f)
 
 
 # ============================================================
-#  VECTORISED LEGENDRE RECURRENCE  (unchanged from main.py)
+#  VECTORISED LEGENDRE RECURRENCE 
 # ============================================================
 
 def compute_legendre_recurrence(mu, ell_max):
@@ -100,18 +100,17 @@ def compute_legendre_recurrence(mu, ell_max):
 
 
 # ============================================================
-#  G KERNELS  — Eqs (1) and (2)
+#  G KERNELS
 # ============================================================
 
 def G1(ell, P0_ell, P2_ell):
-    """G_l^(1)(Theta) = -1/2 [ P_l^2(cos Theta)/(l(l+1)) - P_l(cos Theta) ]
-    [Eq. (1)]."""
+    """G_l^(1)(Theta) = -1/2 [ P_l^2(cos Theta)/(l(l+1)) - P_l(cos Theta) ]"""
     ll1 = ell * (ell + 1.0)
     return -0.5 * (P2_ell / ll1 - P0_ell)
 
 
 def G2(ell, P1_ell, theta):
-    """G_l^(2)(Theta) = -1/(l(l+1)) * P_l^1(cos Theta)/sin(Theta)  [Eq. (2)].
+    """G_l^(2)(Theta) = -1/(l(l+1)) * P_l^1(cos Theta)/sin(Theta)
 
     Singularities resolved analytically:
         Theta -> 0 :  lim = +0.5  (for all ell >= 2)
@@ -132,7 +131,7 @@ def G2(ell, P1_ell, theta):
 
 
 # ============================================================
-#  C_parallel(Theta)  — Eq. (10)
+#  C_parallel(Theta)
 # ============================================================
 
 def C_parallel(theta_arr, f, ell_min=ELL_MIN, ell_max=ELL_MAX):
@@ -140,11 +139,8 @@ def C_parallel(theta_arr, f, ell_min=ELL_MIN, ell_max=ELL_MAX):
     C^parallel(Theta) = sum_{ell=ell_min}^{ell_max}
         (2*ell + 1) / (4*pi)  *  [ C_ell^EE * G1_ell(Theta)
                                   + C_ell^BB * G2_ell(Theta) ]
-    [Eq. (10)].
 
     Singularities at Theta = 0 and Theta = pi are handled inside G2.
-    The boundary at Theta = pi is additionally forced to zero per the
-    analytic limit of the full sum.
     """
     theta_arr = np.asarray(theta_arr, dtype=float)
     mu = np.cos(theta_arr)
