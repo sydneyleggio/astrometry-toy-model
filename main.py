@@ -31,10 +31,24 @@ A_gw = 1e-15
 sigma_bar_sq = P_n
 
 # Field parameters
-FIELD_SIZE_DEG = 100
+FIELD_SIZE_DEG = 10
 N_STARS        = 100
 STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
+
+# ------------------------------------------------------------
+# OPTIONAL Slurm override (added for cluster batch runs)
+# ------------------------------------------------------------
+# Does nothing on your local machine. If SLURM_N_STARS / SLURM_FIELD_SIZE_DEG
+# are not set in the environment, FIELD_SIZE_DEG and N_STARS above are used
+# exactly as hand-edited, unchanged. Only set when the Slurm job script
+# exports these variables before calling python.
+import os as _os
+if _os.environ.get('SLURM_N_STARS'):
+    N_STARS = int(_os.environ['SLURM_N_STARS'])
+if _os.environ.get('SLURM_FIELD_SIZE_DEG'):
+    FIELD_SIZE_DEG = float(_os.environ['SLURM_FIELD_SIZE_DEG'])
+# ------------------------------------------------------------
 
 EPS = 1e-14
 

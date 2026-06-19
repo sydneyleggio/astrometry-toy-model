@@ -477,12 +477,16 @@ if __name__ == "__main__":
 
     gamma = gamma_parallel(theta_mat, ell_min, ell_max)
 
+    # Tag the output filename with N/FoV so multiple Slurm array tasks
+    # (different N_STARS / FIELD_SIZE_DEG) don't overwrite each other's plot.
+    out_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.png"
+
     r_vals, rho_cp, rho_hd = plot_full_comparison(
         gamma,
         ell_min,
         ell_max,
         n_r=30,
-        save_path="hd_full_matrix_snr_fast.png",
+        save_path=out_name,
     )
 
     print("\nSelected output:")
