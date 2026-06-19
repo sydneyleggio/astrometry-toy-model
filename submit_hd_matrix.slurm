@@ -23,7 +23,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=64G
+#SBATCH --mem=16G
 #SBATCH --time=3:00:00
 #SBATCH --output=logs/hd_matrix_%j.out
 #SBATCH --error=logs/hd_matrix_%j.err
