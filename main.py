@@ -1,4 +1,6 @@
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # non-interactive backend — required for headless Slurm jobs
 import matplotlib.pyplot as plt
 import astropy.units as u
 
@@ -42,13 +44,7 @@ RANDOM_SEED     = 1234
 # (verified: identical output to batch_size=5000 down to batch_size=7).
 GAMMA_BATCH_SIZE = 500
 
-# ------------------------------------------------------------
-# OPTIONAL Slurm override (added for cluster batch runs)
-# ------------------------------------------------------------
-# Does nothing on your local machine. If SLURM_N_STARS / SLURM_FIELD_SIZE_DEG /
-# SLURM_GAMMA_BATCH_SIZE are not set in the environment, the values above are
-# used exactly as hand-edited, unchanged. Only set when the Slurm job script
-# exports these variables before calling python.
+
 import os as _os
 if _os.environ.get('SLURM_N_STARS'):
     N_STARS = int(_os.environ['SLURM_N_STARS'])
@@ -470,7 +466,14 @@ def main():
     ax.legend(fontsize=10)
     ax.grid(True, which='both', alpha=0.3)
     plt.tight_layout()
-    plt.show()
+
+    # Saved (rather than plt.show()) so this works headlessly on a Slurm
+    # batch job with no display, and tagged with N/FoV so different runs
+    # don't overwrite each other's plot — same convention used in
+    # hd_full_matrix_snr.py's output naming.
+    out_name = f"main_cp_hd_case3_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.png"
+    plt.savefig(out_name, dpi=150)
+    print(f"Saved plot to {out_name}")
 
 
 # ============================================================
