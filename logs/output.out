@@ -1,0 +1,8 @@
+==========================================
+Running with N_STARS=2500, FIELD_SIZE_DEG=250
+==========================================
+Using interpreter: /home1/sleggio/.conda/envs/astrosnr/bin/python3
+matplotlib OK: /home1/sleggio/.conda/envs/astrosnr/lib/python3.11/site-packages/matplotlib/__init__.py
+Running from: /project2/kmpardo_1034/cphd_snr_sydney/astrometry-toy-model
+ell_min=2, ell_max=5203, N_stars=2500
+N_pairs = 3123750

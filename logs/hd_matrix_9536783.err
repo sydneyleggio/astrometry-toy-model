@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/project2/kmpardo_1034/cphd_snr_sydney/astrometry-toy-model/hd_full_matrix_snr.py", line 17, in <module>
+    import matplotlib.pyplot as plt
+ModuleNotFoundError: No module named 'matplotlib'
