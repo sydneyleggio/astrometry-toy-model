@@ -489,6 +489,24 @@ if __name__ == "__main__":
         save_path=out_name,
     )
 
+    # Save the underlying arrays alongside the plot, tagged with the same
+    # N/FoV convention as the PNG filename, so future runs can be compared
+    # and overlaid using the real data rather than extracting curves from
+    # the rendered image pixels.
+    data_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.npz"
+    np.savez(
+        data_name,
+        r_vals=r_vals,
+        rho_cp=rho_cp,
+        rho_hd=rho_hd,
+        N_STARS=N_STARS,
+        FIELD_SIZE_DEG=FIELD_SIZE_DEG,
+        ell_min=ell_min,
+        ell_max=ell_max,
+        PHYSICAL_RATIO=PHYSICAL_RATIO,
+    )
+    print(f"Data saved to {data_name}")
+
     print("\nSelected output:")
     print(f"{'r':>10}  {'rho_CP':>10}  {'rho_HD':>10}")
     for rv, rcp, rhd in zip(r_vals[::5], rho_cp[::5], rho_hd[::5]):
