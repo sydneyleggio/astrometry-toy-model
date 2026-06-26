@@ -5,15 +5,15 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=200G
+#SBATCH --mem=16G
 #SBATCH --time=3:00:00
 #SBATCH --output=logs/output.out
 #SBATCH --error=logs/error.err
 
 set -euo pipefail
 
-export SLURM_N_STARS=1000
-export SLURM_FIELD_SIZE_DEG=100
+export SLURM_N_STARS=100
+export SLURM_FIELD_SIZE_DEG=170
 export SLURM_GAMMA_BATCH_SIZE=200
 
 echo "=========================================="
