@@ -1,5 +1,5 @@
 """
-plot_cp_hd.py
+cphd_plot_case3approx.py
 =============
 Plots CP and HD SNR curves on the same axes vs P_gw(f_l)/P_n.
 

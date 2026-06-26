@@ -4,7 +4,7 @@ hd_full_matrix_snr.py
 Plots the full-curve HD SNR vs r = P_gw(f_l)/P_n using an exact matrix-free solver for the full covariance.
 
 """
-
+#to prevent errors from using Python 3.8 or 3.9 (or anything before 3.10) on the cluster
 from __future__ import annotations
 
 import inspect
@@ -12,14 +12,13 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, Tuple
-
+from typing import Callable
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, minres, gmres
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from main import (  # noqa: E402
+
+from main import (  
     build_star_positions,
     pairwise_theta,
     compute_ell_limits,
@@ -37,7 +36,7 @@ from main import (  # noqa: E402
 EPS = 1e-14
 F_PHYS = 192.0 * np.pi**3
 
-
+#keeps the code compatible with SciPy 1.10 and 1.11, which changed the iterative solver keyword from tol -> rtol
 def _iterative_tol_kwargs(func, tol: float):
     """Return version-compatible tolerance keyword arguments for SciPy solvers."""
     params = inspect.signature(func).parameters
@@ -69,7 +68,9 @@ class HDPairData:
 def build_hd_pair_data(gamma_matrix: np.ndarray) -> HDPairData:
     """Build the pair index arrays and the N x N F_g matrix once."""
     n_star = int(gamma_matrix.shape[0])
+    #only upper-triangle when a < b, since the pair matrix is symmetric and we only need one copy of each pair
     a_idx, b_idx = np.triu_indices(n_star, k=1)
+    #F is gamma tilde in the written math
     F = F_PHYS * np.array(gamma_matrix, dtype=float, copy=True)
     np.fill_diagonal(F, 0.0)
     Fab = F[a_idx, b_idx]
@@ -84,7 +85,7 @@ def build_hd_pair_data(gamma_matrix: np.ndarray) -> HDPairData:
 
 
 # ============================================================
-#                EXACT MATVEC FOR M(r) x
+#                EXACT MATVEC FOR M(r)
 # ============================================================
 
 def make_hd_matvec(data: HDPairData, r: float) -> Callable[[np.ndarray], np.ndarray]:
@@ -103,14 +104,6 @@ def make_hd_matvec(data: HDPairData, r: float) -> Callable[[np.ndarray], np.ndar
         U    = F X,
         S    = F X F,
         row_sum[i] = sum of pair amplitudes incident to star i.
-
-    The first line reproduces the original A + B/r + D/r^2 algebra exactly.
-    The second and third lines are the corrections needed for the full
-    P_a = P_na + P_gw noise convention (rather than P_a ~ P_na only):
-    Case 2 picks up an extra r^0 term equal to the same (U_ab+U_ba)/F_ab
-    ratio already present in the B-piece above, and Case 3 (diagonal)
-    picks up an extra r^0 term 1/F_ab^2 and an extra r^-1 term 2/F_ab^2 --
-    see build_HD_matrices for the dense-matrix derivation these match.
     """
     a_idx = data.a_idx
     b_idx = data.b_idx
@@ -125,34 +118,48 @@ def make_hd_matvec(data: HDPairData, r: float) -> Callable[[np.ndarray], np.ndar
         if x.ndim != 1 or x.size != n_pairs:
             raise ValueError(f"Expected vector of length {n_pairs}, got {x.shape}")
 
+        # Step 1: lift the pair-space vector x (length n_pairs) into an
+        # N x N star-space matrix X, so we can use fast N x N matrix
+        # multiplication instead of looping over all pairs-of-pairs.
         # Symmetric pair matrix X with X_ab = x_ab / F_ab for a != b.
         X = np.zeros_like(F)
         x_scaled = x / Fab
         X[a_idx, b_idx] = x_scaled
         X[b_idx, a_idx] = x_scaled
 
-        # U = F X, S = F X F.
+        # Step 2: U and S do the actual "summing over shared stars" work.
+        # Multiplying through F (the star-to-star coupling matrix) implicitly
+        # accounts for every pair that shares a star with pair (a,b).
+        # This replaces what would otherwise be an O(N_pairs^2) double loop.
         U = F @ X
         S = U @ F
 
+        # Step 3: diagonal of U isolates the "pair shares both stars with
+        # itself" correction terms (needed to avoid double-counting below).
         diag_U = np.diag(U)
+        
+        # Step 4: row_sum[i] = total signal amplitude touching star i,
+        # accumulated over every pair that includes star i. This captures
+        # the "one shared star" (Case 2) contributions.
         row_sum = np.bincount(a_idx, weights=x, minlength=F.shape[0])
         row_sum += np.bincount(b_idx, weights=x, minlength=F.shape[0])
 
+        # case2_term: the r-independent piece shared by several terms below.
         case2_term = (U[a_idx, b_idx] + U[b_idx, a_idx]) / Fab
 
+        # Step 5: assemble y = M(r) @ x, one pair at a time, by reading off
+        # each algebraic piece computed above.
         y = (
-            S[a_idx, b_idx] / Fab
-            - diag_U[a_idx]
+            S[a_idx, b_idx] / Fab          # main double-contraction term
+            - diag_U[a_idx]                 # remove self-overlap double-count
             - diag_U[b_idx]
-            + row_sum[a_idx]
+            + row_sum[a_idx]                # Case 2 (one shared star) terms
             + row_sum[b_idx]
-            + case2_term * inv_r
-            + x * (inv_r2 / (Fab * Fab))
-            # --- full-noise (P_a = P_na + P_gw) corrections ---
-            + case2_term
-            + x / (Fab * Fab)
-            + 2.0 * x * (inv_r / (Fab * Fab))
+            + case2_term * inv_r            # Case 2 term scaled by 1/r  (the "B/r" piece)
+            + x * (inv_r2 / (Fab * Fab))    # Case 3 (same pair) term, scaled by 1/r^2 (the "D/r^2" piece)
+            + case2_term                    # Case 2 fix: r^0 term
+            + x / (Fab * Fab)               # Case 3 fix: r^0 term
+            + 2.0 * x * (inv_r / (Fab * Fab))  # Case 3 fix: extra 1/r term
         )
         return np.asarray(y, dtype=float)
 
@@ -166,16 +173,11 @@ def make_hd_matvec(data: HDPairData, r: float) -> Callable[[np.ndarray], np.ndar
 def build_HD_matrices(gamma_matrix: np.ndarray):
     """Original dense decomposition (kept for small problems only).
 
-    Uses the full noise convention P_a = P_na + P_gw for every star (i.e.
-    each star's total power is its noise floor PLUS the GW signal it is
-    actually carrying), consistent with the C_ab,cd derivation notes.
+    Uses the full noise convention P_a = P_na + P_gw for every star 
 
     Case 1 (no shared star) has no P_a/P_b dependence and is unaffected.
     Case 2 (one shared star) and Case 3/diagonal (same pair) each pick up
-    extra r-independent terms relative to the leading-order P_a ~ P_na
-    approximation (Romano eq. 37's simplification) that this function used
-    to implement:
-
+    extra r-independent terms 
       Case 2: C_ab,ad = 1 + (P_a/P_gw) * F_bd/(F_ab F_ad)
               with P_a/P_gw = 1/r + 1  ->  extra "+1" term goes into A.
       Case 3: C_ab,ab = 1 + (P_a P_b/P_gw^2) * 1/F_ab^2
@@ -227,9 +229,7 @@ def build_HD_matrices(gamma_matrix: np.ndarray):
         B[case2_ad] = (Fg_mat[b_i, c_j] / (Fg_ab * Fg_mat[a_i, c_j]))[case2_ad]
         B[case2_bd] = (Fg_mat[a_i, c_j] / (Fg_ab * Fg_mat[b_i, c_j]))[case2_bd]
 
-    # ---- Full P_a = P_na + P_gw correction ----
-    # Case 2: P_a/P_gw = 1/r + 1, so the "+1" multiplies the same ratio
-    # already computed for B above -- add it into A at the same entries.
+
     A[case2_ac] += B[case2_ac]
     A[case2_bc] += B[case2_bc]
     A[case2_ad] += B[case2_ad]
@@ -238,9 +238,7 @@ def build_HD_matrices(gamma_matrix: np.ndarray):
     D = np.zeros((n_pairs, n_pairs), dtype=float)
     np.fill_diagonal(D, 1.0 / Fg_pair**2)
 
-    # Case 3 (diagonal): P_a*P_b/P_gw^2 = 1/r^2 + 2/r + 1, so the "+1" term
-    # goes into A and the "2/r" term goes into B (D already holds the 1/r^2
-    # term and is unaffected).
+
     diag_idx = np.diag_indices(n_pairs)
     A[diag_idx] += 1.0 / Fg_pair**2
     B[diag_idx] += 2.0 / Fg_pair**2
@@ -251,7 +249,7 @@ def build_HD_matrices(gamma_matrix: np.ndarray):
 def rho_hd_full_matrix_dense(x_arr, gamma_matrix, svd_rcond=1e-10, verbose=True):
     """Original dense eigendecomposition path."""
     if verbose:
-        print("Building HD covariance matrices A, B, C, D...", flush=True)
+        print("Building HD covariance matrices A, B, D...", flush=True)
     t0 = time.time()
     _, A, B, D = build_HD_matrices(gamma_matrix)
     n_pairs = A.shape[0]
@@ -348,7 +346,7 @@ def rho_hd_full_matrix(
         matvec = make_hd_matvec(data, r)
         Aop = LinearOperator((data.n_pairs, data.n_pairs), matvec=matvec, dtype=float)
 
-        # Diagonal of M(r), full P_a=P_b=P_na+P_gw convention:
+        # Diagonal of M(r):
         # 1 + 1/F_ab^2 + 2/(r F_ab^2) + 1/(r^2 F_ab^2)
         diag = (
             1.0
@@ -416,30 +414,12 @@ def hd_strong_signal_plateau(gamma_matrix):
     using the full N_pairs x N_pairs covariance matrix (not just the diagonal
     Case-3-only approximation).
 
-    As r -> infinity, M(r) = A + B/r + D/r^2 -> A, so the plateau is
-    rho^2 = 2 * 1^T A^-1 1. Exploiting the near-uniformity of F_ab = F*gamma_ab
-    across pairs (the geometric-uniformity result this paper is built on),
-    replace every F_ab by its mean F0. The resulting idealized A then depends
-    only on how many star indices two pairs share (0, 1, or 2), which makes it
-    a Johnson-scheme matrix with exactly 3 eigenvalues (multiplicities 1,
-    N-1, and C(N,2)-N). The all-ones vector lies entirely in the
-    multiplicity-1 eigenspace, so 1^T A^-1 1 reduces to a single scalar
-    division by that eigenvalue:
+    rho^2_HD,intermediate ~= F0^2 * N(N-1) / [F0^2*(N^2-3N+3) + 2*F0*(N-2) + 1]
 
-        rho^2_HD,strong ~= F0^2 * N(N-1) / [F0^2*(N^2-3N+3) + 2*F0*(N-2) + 1]
-
-    This is an approximation (exact in the limit of perfectly uniform F_ab)
-    but matches the true numeric plateau to ~0.1-0.5% for narrow-field star
-    counts tested here. It is NOT the same as the old diagonal-only-approx
-    reference sqrt(N*(N-1)), which ignores correlations between pairs that
-    share a star and overstates the achievable HD SNR by roughly a factor
-    of N.
-
-    CAVEAT: this approximation degrades for wide or full-sky fields, where
-    gamma_ab is no longer close to uniform across pairs (that's the whole
-    point of using a wide field -- see the main paper result). Treat this
-    as a narrow-field-only diagnostic; for wide fields, rely on the numeric
-    plateau (max(rho_hd)) instead.
+    IMPORTANT: this approximation degrades for wide or full-sky fields, where
+    gamma_ab is no longer close to uniform across pairs. Treat this
+    as a narrow-field-only diagnostic, and rely on the numeric
+    plateau (max(rho_hd)) instead for wide or full-sky fields.
     """
     n_star = gamma_matrix.shape[0]
     Fg = F_PHYS * gamma_matrix
@@ -498,17 +478,18 @@ def print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, gamma_matr
 
     print('\n' + '='*60)
     print('              SNR CURVE DIAGNOSTICS (full matrix)')
+    print(f'  ell_min={ell_min}, ell_max={ell_max}, N_stars={n_stars}, N_pairs={n_pairs}')
     print('='*60)
 
     print('\n── Common Process (CP) ──')
-    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_cp_weak:+.3f}  (expect +1.0)')
-    print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_cp_strong:+.3f}  (expect ~0)')
+    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_cp_weak:+.3f}')
+    print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_cp_strong:+.3f}')
     print(f'  Plateau [analytic]  = 1/gamma0             = {cp_plateau_anal:.4f}')
     print(f'  Plateau [numeric ]  = max(rho_CP)          = {cp_plateau_num:.4f}')
 
     print('\n── Hellings-Downs (HD) — full covariance matrix ──')
-    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_hd_weak:+.3f}  (expect +1.0)')
-    print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_hd_strong:+.3f}  (expect ~0)')
+    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_hd_weak:+.3f}')
+    print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_hd_strong:+.3f}')
     print(f'  Plateau [analytic]  = uniform-F_ab approx  = {hd_plateau_anal:.4f}')
     print(f'  Plateau [numeric ]  = max(rho_HD)          = {hd_plateau_num:.4f}')
     print('='*60 + '\n')
@@ -587,8 +568,7 @@ if __name__ == "__main__":
 
     # Save the underlying arrays alongside the plot, tagged with the same
     # N/FoV convention as the PNG filename, so future runs can be compared
-    # and overlaid using the real data rather than extracting curves from
-    # the rendered image pixels.
+    # and overlaid with compare_snr_runs_fullmatrix.py.
     data_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.npz"
     np.savez(
         data_name,

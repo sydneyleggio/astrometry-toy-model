@@ -68,13 +68,6 @@ def rho_hd_weak(gammas, r_values):
 def rho_hd_intermediate(gammas):
     """
     Intermediate-signal plateau: rho^2 = sum_{a<b} 2*(F*g)^2 / ((F*g)^2 + 1)
-
-    Derived from the correct HD formula in the limit Pgw >> sigma^2:
-      (Pgw + sigma^2)^2 -> Pgw^2
-      rho^2_ab -> 2*(F*g)^2 / ((F*g)^2 + 1)  (Pgw^2 cancels)
-
-    This is a pure geometric number, independent of r.
-    For F*g >> 1: each term -> 2, so plateau -> sqrt(2*N_pairs) = sqrt(N*(N-1)).
     """
     F  = ASTRO_FACTOR
     Fg = F * gammas

@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # non-interactive backend — required for headless Slurm jobs
+matplotlib.use('Agg')  # non-interactive backend needed for Slurm jobs
 import matplotlib.pyplot as plt
 import astropy.units as u
 
@@ -39,12 +39,10 @@ STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
 
 # Batch size for gamma_parallel_matrix's Legendre-recurrence chunking.
-# Lower = less peak memory per chunk, more chunks, slightly slower.
 # This only affects memory/runtime, never the computed gamma values
-# (verified: identical output to batch_size=5000 down to batch_size=7).
 GAMMA_BATCH_SIZE = 500
 
-
+#For the overwrites in the slurm file
 import os as _os
 if _os.environ.get('SLURM_N_STARS'):
     N_STARS = int(_os.environ['SLURM_N_STARS'])
@@ -57,10 +55,10 @@ if _os.environ.get('SLURM_GAMMA_BATCH_SIZE'):
 EPS = 1e-14
 
 # Physical GW power spectrum at f_l
-# P_gw(f) = A_gw^2 / (12*pi^2) * (f/f_yr)^(-4/3) * f^(-1),  alpha = -2/3
+# P_gw(f) = A_gw^2 / (12*pi^2) * (f/f_yr)^(-4/3) * f^(-1)
 P_gw_fl = (A_gw**2 / (12.0 * np.pi**2)) * (f_l / f_yr)**(-4.0/3.0) / f_l
 
-# Physical operating point on the x-axis — used for vertical marker on plots
+# Physical operating point on the x-axis used for vertical marker on plots
 # This is the actual value of P_gw/P_n with all constants plugged in
 PHYSICAL_RATIO = P_gw_fl / P_n
 
@@ -75,14 +73,11 @@ def build_star_positions(star_coords_deg=None, n_stars=N_STARS,
     """
     Sample n_stars uniformly within an angular-diameter patch of
     field_size_deg, centered at (center_ra_deg, center_dec_deg), using
-    true spherical (great-circle) geometry rather than a flat-sky
-    approximation.
+    true spherical (great-circle) geometry.
 
     field_size_deg=360 (or >=180) samples the FULL SKY uniformly.
     Smaller field_size_deg samples a circular patch of that angular
-    diameter -- this is a strict generalization of the old flat-sky
-    behavior, which it reproduces to within ~0.3% at field_size_deg=10
-    and converges to exactly as field_size_deg -> 0.
+    diameter.
 
     Returns an (n_stars, 2) array of [RA_deg, Dec_deg].
     """
@@ -133,9 +128,7 @@ def build_star_positions(star_coords_deg=None, n_stars=N_STARS,
 def pairwise_theta(stars_deg):
     """
     True pairwise angular separation (radians) between every pair of
-    stars on the sphere, via the haversine formula. Numerically stable
-    at both very small separations and near antipodal (180 deg)
-    separations, and correctly handles the RA=0/360 wraparound.
+    stars on the sphere, via the haversine formula. 
 
     stars_deg: (N, 2) array of [RA_deg, Dec_deg].
     """
@@ -255,18 +248,67 @@ def gamma_parallel(theta, ell_min, ell_max):
     """
     Gamma_o^parallel(Theta) = sum_{l=ell_min}^{ell_max}
         (2l+1)/(4pi) * F_sq(l) * (G1_l(Theta) + G2_l(Theta))
+
+    Streaming version of the l-sum: mathematically identical to evaluating
+    the full (ell_max+1, *theta.shape) P0/P1/P2 cube from
+    compute_legendre_recurrence and then summing G1+G2 over all l (verified
+    bit-for-bit equal). The only difference is that we never materialize
+    that full cube -- we keep just the previous and current l in memory
+    (the recurrence only ever needs P[l] and P[l-1] to get P[l+1]), and
+    accumulate the weighted G1+G2 sum on the fly. This turns peak memory
+    from O(ell_max * len(theta)) into O(len(theta)), which matters because
+    ell_max (set by the closest star pair, see compute_ell_limits) can be
+    tens of thousands for densely packed star fields.
     """
     theta = np.clip(np.asarray(theta, dtype=float), 0, np.pi)
     mu    = np.cos(theta)
-
-    P0, P1, P2 = compute_legendre_recurrence(mu, ell_max)
+    sin_t = np.sqrt(np.maximum(1.0 - mu**2, 0.0))
 
     total = np.zeros_like(theta)
-    for ell in range(ell_min, ell_max + 1):
-        g1     = G1(ell, P0[ell], P2[ell])
-        g2     = G2(ell, P1[ell], theta)
-        weight = (2.0 * ell + 1.0) / (4.0 * np.pi) * F_sq(ell)
-        total += weight * (g1 + g2)
+
+    # l=0 values (same initialization as compute_legendre_recurrence: P0[0]=1, P1[0]=0, P2[0]=0)
+    P0_l, P1_l, P2_l = np.ones_like(mu), np.zeros_like(mu), np.zeros_like(mu)
+
+    # l=1 values (same initialization: P0[1]=mu, P1[1]=-sin_t, P2[1]=0)
+    P0_lp1, P1_lp1, P2_lp1 = mu.copy(), -sin_t.copy(), np.zeros_like(mu)
+
+    for ell in (0, 1):
+        if ell_min <= ell <= ell_max:
+            P0_ell, P1_ell, P2_ell = (P0_l, P1_l, P2_l) if ell == 0 else (P0_lp1, P1_lp1, P2_lp1)
+            g1     = G1(ell, P0_ell, P2_ell)
+            g2     = G2(ell, P1_ell, theta)
+            weight = (2.0 * ell + 1.0) / (4.0 * np.pi) * F_sq(ell)
+            total += weight * (g1 + g2)
+
+    # Advance the 3-term recurrence one l at a time, accumulating the
+    # weighted sum immediately instead of storing every l.
+    for l in range(1, ell_max):
+        P0_next = ((2*l + 1) * mu * P0_lp1 - l * P0_l) / (l + 1)
+
+        if l == 1:
+            P1_next = (2*l + 1) * mu * P1_lp1
+        else:
+            P1_next = ((2*l + 1) * mu * P1_lp1 - (l + 1) * P1_l) / l
+
+        if l + 1 == 2:
+            P2_next = 3.0 * sin_t**2          # matches original P2[2] initialization (set before loop, l=1 never touches it)
+        elif l >= 3:
+            P2_next = ((2*l + 1) * mu * P2_lp1 - (l + 2) * P2_l) / (l - 1)
+        elif l == 2:
+            P2_next = (2*l + 1) * mu * P2_lp1  # matches original's "if l>=2: ... else: (2l+1)*mu*P2[l]" branch
+        else:
+            P2_next = np.zeros_like(mu)       # l+1 < 2: P2 not yet defined, matches original zeros
+
+        ell = l + 1
+        if ell_min <= ell <= ell_max:
+            g1     = G1(ell, P0_next, P2_next)
+            g2     = G2(ell, P1_next, theta)
+            weight = (2.0 * ell + 1.0) / (4.0 * np.pi) * F_sq(ell)
+            total += weight * (g1 + g2)
+
+        P0_l, P0_lp1 = P0_lp1, P0_next
+        P1_l, P1_lp1 = P1_lp1, P1_next
+        P2_l, P2_lp1 = P2_lp1, P2_next
 
     return total
 
@@ -381,7 +423,7 @@ def rho_hd_full(x_arr, gamma_matrix):
     HD full SNR via diagonal (Case 3) approximation of the N_pairs x N_pairs
     covariance matrix.
 
-    From Romano eq 37, inverting C_{ab,ab} and summing:
+    From inverting C_{ab,ab} and summing:
         rho^2_HD = sum_{a<b} 2*Pgw^2*(F*g_ab)^2
                               / [(Pgw*F*g_ab)^2 + (Pgw + sigma^2)^2]
 
@@ -531,9 +573,9 @@ def main():
     ax.grid(True, which='both', alpha=0.3)
     plt.tight_layout()
 
-    # Saved (rather than plt.show()) so this works headlessly on a Slurm
+    # Saved (rather than plt.show()) so this works on a Slurm
     # batch job with no display, and tagged with N/FoV so different runs
-    # don't overwrite each other's plot — same convention used in
+    # don't overwrite each other's plot. The same convention is used in
     # hd_full_matrix_snr.py's output naming.
     out_name = f"main_cp_hd_case3_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.png"
     plt.savefig(out_name, dpi=150)

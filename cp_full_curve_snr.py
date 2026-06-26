@@ -11,15 +11,6 @@ The full CP SNR formula is:
 
 where F = 192*pi^3, gamma0 = Gamma_o(0) (single-star self-overlap),
 and r = P_gw/P_n is the x-axis variable.
-
-Correct asymptotes:
-  Weak signal (r -> 0):
-    rho^2 -> N * (F*r)^2
-    rho   -> sqrt(N) * F * r
-
-  Intermediate (r -> inf):
-    rho^2 -> 1 / gamma0^2
-    rho   -> 1 / gamma0        (independent of N)
 """
 
 import numpy as np
