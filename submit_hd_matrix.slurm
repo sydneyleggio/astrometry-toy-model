@@ -12,8 +12,8 @@
 
 set -euo pipefail
 
-export SLURM_N_STARS=1250
-export SLURM_FIELD_SIZE_DEG=125
+export SLURM_N_STARS=1000
+export SLURM_FIELD_SIZE_DEG=100
 export SLURM_GAMMA_BATCH_SIZE=200
 
 echo "=========================================="
