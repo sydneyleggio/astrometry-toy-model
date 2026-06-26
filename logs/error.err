@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/project2/kmpardo_1034/cphd_snr_sydney/astrometry-toy-model/hd_full_matrix_snr.py", line 574, in <module>
+    gamma = gamma_parallel(theta_mat, ell_min, ell_max)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/project2/kmpardo_1034/cphd_snr_sydney/astrometry-toy-model/main.py", line 262, in gamma_parallel
+    P0, P1, P2 = compute_legendre_recurrence(mu, ell_max)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/project2/kmpardo_1034/cphd_snr_sydney/astrometry-toy-model/main.py", line 181, in compute_legendre_recurrence
+    P0 = np.zeros((ell_max + 1,) + shape)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+numpy._core._exceptions._ArrayMemoryError: Unable to allocate 289. GiB for an array with shape (38748, 1000, 1000) and data type float64
