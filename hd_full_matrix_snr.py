@@ -434,6 +434,12 @@ def hd_strong_signal_plateau(gamma_matrix):
     reference sqrt(N*(N-1)), which ignores correlations between pairs that
     share a star and overstates the achievable HD SNR by roughly a factor
     of N.
+
+    CAVEAT: this approximation degrades for wide or full-sky fields, where
+    gamma_ab is no longer close to uniform across pairs (that's the whole
+    point of using a wide field -- see the main paper result). Treat this
+    as a narrow-field-only diagnostic; for wide fields, rely on the numeric
+    plateau (max(rho_hd)) instead.
     """
     n_star = gamma_matrix.shape[0]
     Fg = F_PHYS * gamma_matrix
