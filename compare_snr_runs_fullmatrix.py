@@ -35,16 +35,22 @@ import matplotlib.pyplot as plt
 # EDIT THIS LIST — paths to the .npz files you want to compare
 # ------------------------------------------------------------
 FILES = [
-    "hd_full_matrix_snr_N10_FoV10.npz",
-    "hd_full_matrix_snr_N40_FoV20.npz",
-    "hd_full_matrix_snr_N90_FoV30.npz",
-    "hd_full_matrix_snr_N160_FoV40.npz",
-    "hd_full_matrix_snr_N250_FoV50.npz",
-    "hd_full_matrix_snr_N360_FoV60.npz",
-    "hd_full_matrix_snr_N490_FoV70.npz",
-    "hd_full_matrix_snr_N640_FoV80.npz",
-    "hd_full_matrix_snr_N810_FoV90.npz",
-    "hd_full_matrix_snr_N1000_FoV100.npz",
+    "hd_full_matrix_snr_N100_FoV10.npz",
+    "hd_full_matrix_snr_N100_FoV20.npz",
+    "hd_full_matrix_snr_N100_FoV30.npz",
+    "hd_full_matrix_snr_N100_FoV40.npz",
+    "hd_full_matrix_snr_N100_FoV50.npz",
+    "hd_full_matrix_snr_N100_FoV60.npz",
+    "hd_full_matrix_snr_N100_FoV70.npz",
+    "hd_full_matrix_snr_N100_FoV80.npz",
+    "hd_full_matrix_snr_N100_FoV90.npz",
+    "hd_full_matrix_snr_N100_FoV100.npz",
+    "hd_full_matrix_snr_N100_FoV110.npz",
+    "hd_full_matrix_snr_N100_FoV120.npz",
+    "hd_full_matrix_snr_N100_FoV130.npz",
+    "hd_full_matrix_snr_N100_FoV140.npz",
+    "hd_full_matrix_snr_N100_FoV150.npz",
+    "hd_full_matrix_snr_N100_FoV160.npz",
 ]
 
 # Output filename for the comparison plot
