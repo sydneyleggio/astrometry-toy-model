@@ -33,8 +33,8 @@ A_gw = 1e-15
 sigma_bar_sq = P_n
 
 # Field parameters
-FIELD_SIZE_DEG = 10
-N_STARS        = 100
+FIELD_SIZE_DEG = 360
+N_STARS        = 45
 STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
 
