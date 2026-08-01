@@ -4,7 +4,7 @@ A small-scale numerical testbed for detecting a stochastic gravitational-wave ba
 
 Pulsar timing arrays search for a gravitational-wave background hidden in the correlated timing residuals of many pulsars, with the expected pair correlation given by the Hellings-Downs curve. This project asks the same question for astrometry: if a GWB is instead measured through tiny apparent position shifts of stars on the sky, how do the same detection statistics behave, and does the PTA intuition, that a broad pairwise ("Hellings-Downs-like") correlation eventually beats a simpler per-star ("Common Process") statistic, carry over?
 
-This repository is the prototype and validation sandbox for that question. It works at small to moderate star counts with full spherical geometry, and computes the key quantities two independent ways wherever possible, so a bug in one implementation cannot hide undetected. The goal is to get the math right at a scale where everything can be checked against a dense, brute-force alternative, before scaling the same framework up to survey-realistic star fields.
+This repository is the prototype and validation sandbox for that question. It works to moderate star counts with full spherical geometry, and computes the key quantities two independent ways wherever possible, so a bug in one implementation cannot hide undetected. The goal is to get the math right at a scale where everything can be checked against a dense, brute-force alternative, before scaling the same framework up to survey-realistic star fields.
 
 ## What's actually being computed
 
