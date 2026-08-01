@@ -1,5 +1,4 @@
 # astrometry-toy-model
-# astrometry-toy-model
 
 A small-scale numerical testbed for detecting a stochastic gravitational-wave background (GWB) through astrometric deflections of stars, worked out as the direct analog of the pulsar-timing-array (PTA) detection problem.
 
