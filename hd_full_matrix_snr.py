@@ -18,11 +18,13 @@ import numpy as np
 from scipy.sparse.linalg import LinearOperator, minres, gmres
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from main import (  
+from main import (
     build_star_positions,
     pairwise_theta,
     compute_ell_limits,
     gamma_parallel,
+    gamma_scale_factor,
+    NORMALIZED_GAMMA,
     rho_cp_full,
     STAR_COORDS_DEG,
     N_STARS,
@@ -34,6 +36,12 @@ from main import (
 )
 
 EPS = 1e-14
+# Raw physical prefactor, kept importable for backward compatibility (some
+# notebooks compute F_PHYS * gamma_field directly for plotting/diagnostics).
+# Internally, everything below uses gamma_scale_factor() instead of this
+# constant directly, so it respects main.NORMALIZED_GAMMA: gamma_scale_factor()
+# returns F_PHYS when NORMALIZED_GAMMA is False, and 1.0 (a no-op) when True,
+# since a self-normalized Gamma (Gamma(0)=1) shouldn't be rescaled again.
 F_PHYS = 192.0 * np.pi**3
 
 #keeps the code compatible with SciPy 1.10 and 1.11, which changed the iterative solver keyword from tol -> rtol
@@ -71,7 +79,7 @@ def build_hd_pair_data(gamma_matrix: np.ndarray) -> HDPairData:
     #only upper-triangle when a < b, since the pair matrix is symmetric and we only need one copy of each pair
     a_idx, b_idx = np.triu_indices(n_star, k=1)
     #F is gamma tilde in the written math
-    F = F_PHYS * np.array(gamma_matrix, dtype=float, copy=True)
+    F = gamma_scale_factor() * np.array(gamma_matrix, dtype=float, copy=True)
     np.fill_diagonal(F, 0.0)
     Fab = F[a_idx, b_idx]
 
@@ -188,8 +196,9 @@ def build_HD_matrices(gamma_matrix: np.ndarray):
     pairs = np.array([(a, b) for a in range(n_star) for b in range(a + 1, n_star)])
     n_pairs = len(pairs)
 
-    Fg_pair = F_PHYS * gamma_matrix[pairs[:, 0], pairs[:, 1]]
-    Fg_mat = F_PHYS * gamma_matrix
+    scale = gamma_scale_factor()
+    Fg_pair = scale * gamma_matrix[pairs[:, 0], pairs[:, 1]]
+    Fg_mat = scale * gamma_matrix
 
     a_idx = pairs[:, 0]
     b_idx = pairs[:, 1]
@@ -422,7 +431,7 @@ def hd_strong_signal_plateau(gamma_matrix):
     plateau (max(rho_hd)) instead for wide or full-sky fields.
     """
     n_star = gamma_matrix.shape[0]
-    Fg = F_PHYS * gamma_matrix
+    Fg = gamma_scale_factor() * gamma_matrix
     vals = Fg[np.triu_indices_from(Fg, k=1)]
     vals = vals[np.isfinite(vals) & (np.abs(vals) > EPS)]
     if vals.size == 0:
@@ -551,12 +560,15 @@ if __name__ == "__main__":
 
     print(f"ell_min={ell_min}, ell_max={ell_max}, N_stars={N_STARS}")
     print(f"N_pairs = {N_STARS * (N_STARS - 1) // 2}")
+    print(f"NORMALIZED_GAMMA = {NORMALIZED_GAMMA}  (gamma_scale_factor = {gamma_scale_factor():.4f})")
 
     gamma = gamma_parallel(theta_mat, ell_min, ell_max)
 
-    # Tag the output filename with N/FoV so multiple Slurm array tasks
-    # (different N_STARS / FIELD_SIZE_DEG) don't overwrite each other's plot.
-    out_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.png"
+    # Tag the output filename with N/FoV (and normalization state) so
+    # multiple Slurm array tasks / comparison runs don't overwrite each
+    # other's plot.
+    norm_tag = "_normGamma" if NORMALIZED_GAMMA else ""
+    out_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}{norm_tag}.png"
 
     r_vals, rho_cp, rho_hd = plot_full_comparison(
         gamma,
@@ -569,7 +581,7 @@ if __name__ == "__main__":
     # Save the underlying arrays alongside the plot, tagged with the same
     # N/FoV convention as the PNG filename, so future runs can be compared
     # and overlaid with compare_snr_runs_fullmatrix.py.
-    data_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.npz"
+    data_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}{norm_tag}.npz"
     np.savez(
         data_name,
         r_vals=r_vals,
@@ -580,6 +592,7 @@ if __name__ == "__main__":
         ell_min=ell_min,
         ell_max=ell_max,
         PHYSICAL_RATIO=PHYSICAL_RATIO,
+        NORMALIZED_GAMMA=NORMALIZED_GAMMA,
     )
     print(f"Data saved to {data_name}")
 

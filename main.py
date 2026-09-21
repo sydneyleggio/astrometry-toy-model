@@ -33,8 +33,8 @@ A_gw = 1e-15
 sigma_bar_sq = P_n
 
 # Field parameters
-FIELD_SIZE_DEG = 360
-N_STARS        = 45
+FIELD_SIZE_DEG = 10
+N_STARS        = 500 
 STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
 
@@ -50,6 +50,30 @@ if _os.environ.get('SLURM_FIELD_SIZE_DEG'):
     FIELD_SIZE_DEG = float(_os.environ['SLURM_FIELD_SIZE_DEG'])
 if _os.environ.get('SLURM_GAMMA_BATCH_SIZE'):
     GAMMA_BATCH_SIZE = int(_os.environ['SLURM_GAMMA_BATCH_SIZE'])
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
+#              GAMMA NORMALIZATION TOGGLE
+# ------------------------------------------------------------
+# False (default): gamma_parallel returns the raw multipole-sum overlap
+#   function exactly as originally implemented (Gamma(theta=0) ~ 0.0066).
+# True: gamma_parallel self-normalizes so Gamma(theta=0) = 1 exactly
+#   (Gamma_raw(theta) / Gamma_raw(0)). This is the same status 
+#   chi(0)=0.5 has for Hellings & Downs.
+
+NORMALIZED_GAMMA = True
+if _os.environ.get('SLURM_NORMALIZED_GAMMA'):
+    NORMALIZED_GAMMA = _os.environ['SLURM_NORMALIZED_GAMMA'].strip().lower() in ('1', 'true', 'yes')
+
+F_PHYS = 192.0 * np.pi**3
+
+
+def gamma_scale_factor():
+    """Prefactor applied on top of gamma_parallel()'s output everywhere
+    downstream. Always F_PHYS, in both NORMALIZED_GAMMA states -- kept as
+    a function (rather than inlining F_PHYS everywhere) only so call sites
+    don't need to change again if this ever needs to vary."""
+    return F_PHYS
 # ------------------------------------------------------------
 
 EPS = 1e-14
@@ -244,10 +268,16 @@ def F_sq(ell):
 #                  GAMMA OVERLAP FUNCTION
 # ============================================================
 
-def gamma_parallel(theta, ell_min, ell_max):
+def _gamma_parallel_raw(theta, ell_min, ell_max):
     """
     Gamma_o^parallel(Theta) = sum_{l=ell_min}^{ell_max}
         (2l+1)/(4pi) * F_sq(l) * (G1_l(Theta) + G2_l(Theta))
+
+    This is the RAW overlap function -- no normalization applied.
+    Gamma_raw(0) ~ 0.0066, not 1 (see gamma_parallel() below for the
+    self-normalized version). Do not call this directly outside of
+    gamma_parallel(); it exists only so gamma_parallel() can evaluate the
+    raw sum at theta=0 without recursing into its own normalization step.
 
     Streaming version of the l-sum: mathematically identical to evaluating
     the full (ell_max+1, *theta.shape) P0/P1/P2 cube from
@@ -311,6 +341,26 @@ def gamma_parallel(theta, ell_min, ell_max):
         P2_l, P2_lp1 = P2_lp1, P2_next
 
     return total
+
+
+def gamma_parallel(theta, ell_min, ell_max):
+    """
+    Public overlap-function entry point. Every other function in this
+    project (gamma_parallel_matrix, cp_single_star_gamma, and everything
+    downstream in hd_full_matrix_snr.py) calls this, not
+    _gamma_parallel_raw, so the NORMALIZED_GAMMA toggle applies everywhere
+    consistently.
+
+    NORMALIZED_GAMMA = False (default): returns _gamma_parallel_raw(theta)
+        unchanged, Gamma(0) ~ 0.0066.
+    NORMALIZED_GAMMA = True: returns _gamma_parallel_raw(theta) /
+        _gamma_parallel_raw(0), so Gamma(0) = 1 exactly.
+    """
+    raw = _gamma_parallel_raw(theta, ell_min, ell_max)
+    if not NORMALIZED_GAMMA:
+        return raw
+    gamma0_raw = _gamma_parallel_raw(np.array([0.0]), ell_min, ell_max)[0]
+    return raw / gamma0_raw
 
 
 def cp_single_star_gamma(ell_min, ell_max):
@@ -380,7 +430,7 @@ def rho_cp_weak(x, n_stars=N_STARS):
     x = r = P_gw/P_n (dimensionless).
     Takes n_stars as argument so calling scripts can pass N explicitly.
     """
-    factor = 192.0 * np.pi**3
+    factor = gamma_scale_factor()
     return np.sqrt(n_stars) * factor * np.asarray(x, dtype=float)
 
 
@@ -405,7 +455,7 @@ def rho_cp_full(x_arr, ell_min, ell_max, n_stars=N_STARS):
       '2*F*gamma0*r'    : signal-noise cross term, NO factor of N
       'N*(F*gamma0*r)^2': signal-squared, N from coherent sum of auto-correlations
     """
-    factor = 192.0 * np.pi**3
+    factor = gamma_scale_factor()
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     x_arr  = np.asarray(x_arr, dtype=float)
 
@@ -434,7 +484,7 @@ def rho_hd_full(x_arr, gamma_matrix):
       Weak  (Pgw << sigma^2): rho^2 -> 2*F^2*sum(g^2)*r^2
       Strong (Pgw >> sigma^2, F*g >> 1): rho^2 -> 2*N_pairs = N*(N-1)
     """
-    factor = 192.0 * np.pi**3
+    factor = gamma_scale_factor()
     vals   = gamma_matrix[np.triu_indices_from(gamma_matrix, k=1)]
     gammas = vals[np.isfinite(vals) & (np.abs(vals) > EPS)]
     if gammas.size == 0:
@@ -523,10 +573,11 @@ def main():
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
 
     # Diagnostic quantities — printed for reference, NOT used to set x range
-    factor     = 192.0 * np.pi**3
+    factor     = gamma_scale_factor()
     rho_plat   = rho_cp_intermediate(gamma0)
     transition = 1.0 / (np.sqrt(N_STARS) * factor * gamma0)
 
+    print(f'\nNORMALIZED_GAMMA = {NORMALIZED_GAMMA}  (gamma_scale_factor = {factor:.4f})')
     print(f'\nINPUT PARAMETERS:')
     print(f'  sigma_rad        = {sigma_rad:.4e} rad')
     print(f'  sigma_bar^2      = {sigma_bar_sq:.4e}')
@@ -577,7 +628,8 @@ def main():
     # batch job with no display, and tagged with N/FoV so different runs
     # don't overwrite each other's plot. The same convention is used in
     # hd_full_matrix_snr.py's output naming.
-    out_name = f"main_cp_hd_case3_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}.png"
+    norm_tag = "_normGamma" if NORMALIZED_GAMMA else ""
+    out_name = f"main_cp_hd_case3_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}{norm_tag}.png"
     plt.savefig(out_name, dpi=150)
     print(f"Saved plot to {out_name}")
 
