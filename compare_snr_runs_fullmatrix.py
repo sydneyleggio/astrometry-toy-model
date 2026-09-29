@@ -35,16 +35,21 @@ import matplotlib.pyplot as plt
 # EDIT THIS LIST — paths to the .npz files you want to compare
 # ------------------------------------------------------------
 FILES = [
-    "hd_full_matrix_snr_N100_FoV10.npz",
-    "hd_full_matrix_snr_N200_FoV10.npz",
-    "hd_full_matrix_snr_N300_FoV10.npz",
-    "hd_full_matrix_snr_N400_FoV10.npz",
-    "hd_full_matrix_snr_N500_FoV10.npz",
-    "hd_full_matrix_snr_N600_FoV10.npz",
-    "hd_full_matrix_snr_N700_FoV10.npz",
-    "hd_full_matrix_snr_N800_FoV10.npz",
-    "hd_full_matrix_snr_N900_FoV10.npz",
-    "hd_full_matrix_snr_N1000_FoV10.npz",
+    "hd_full_matrix_snr_N100_FoV10_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV20_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV30_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV40_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV50_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV60_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV70_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV80_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV90_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV100_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV110_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV120_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV130_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV160_normGamma_pol2.npz",
+    "hd_full_matrix_snr_N100_FoV180_normGamma_pol2.npz",
 ]
 
 # Output filename for the comparison plot
