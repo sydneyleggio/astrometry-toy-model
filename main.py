@@ -34,7 +34,7 @@ sigma_bar_sq = P_n
 
 # Field parameters
 FIELD_SIZE_DEG = 10
-N_STARS        = 400 
+N_STARS        = 900
 STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
 
