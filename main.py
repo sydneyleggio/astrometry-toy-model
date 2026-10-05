@@ -34,7 +34,7 @@ sigma_bar_sq = P_n
 
 # Field parameters
 FIELD_SIZE_DEG = 10
-N_STARS        = 900
+N_STARS        = 100
 STAR_COORDS_DEG = None
 RANDOM_SEED     = 1234
 
@@ -55,11 +55,16 @@ if _os.environ.get('SLURM_GAMMA_BATCH_SIZE'):
 # ------------------------------------------------------------
 #              GAMMA NORMALIZATION TOGGLE
 # ------------------------------------------------------------
-# False (default): gamma_parallel returns the raw multipole-sum overlap
-#   function exactly as originally implemented (Gamma(theta=0) ~ 0.0066).
+# False: gamma_parallel returns the raw multipole-sum overlap function
+#   (Gamma(theta=0) ~ 0.0066). The GW power prefactor is F = 192 pi^3 and
+#   the x-axis r is the STRAIN-FORM ratio A^2/(12 pi^2) (f/f_yr)^(-4/3) f^-1 / P_n.
 # True: gamma_parallel self-normalizes so Gamma(theta=0) = 1 exactly
-#   (Gamma_raw(theta) / Gamma_raw(0)). This is the same status 
-#   chi(0)=0.5 has for Hellings & Downs.
+#   (Gamma_raw(theta) / Gamma_raw(0)). The prefactor K = 192 pi^3 Gamma_raw(0)
+#   is absorbed into P_gw, so P_gw is the deflection auto-power per
+#   component, the covariance has NO extra prefactor (F = 1), and the
+#   x-axis r = P_gw(f_l)/P_n(f_l) is the deflection power ratio, exactly as
+#   in Romano et al. (2020) with chi -> Gamma.
+# The two modes give identical curves, shifted along x by K.
 
 NORMALIZED_GAMMA = True
 if _os.environ.get('SLURM_NORMALIZED_GAMMA'):
@@ -69,31 +74,89 @@ F_PHYS = 192.0 * np.pi**3
 
 
 def gamma_scale_factor():
-    return F_PHYS
+    """
+    Prefactor multiplying Gamma in the GW power spectra.
+
+    NORMALIZED_GAMMA = True : 1.0 (K = F_PHYS * Gamma_raw(0) lives in P_gw).
+    NORMALIZED_GAMMA = False: F_PHYS = 192 pi^3 (raw Gamma carries Gamma_raw(0)).
+    """
+    return 1.0 if NORMALIZED_GAMMA else F_PHYS
 # ------------------------------------------------------------
 
 EPS = 1e-14
 
 # ------------------------------------------------------------
-#          PARALLEL + PERPENDICULAR POLARIZATION FACTOR
+#          PARALLEL + PERPENDICULAR COMPONENTS
 # ------------------------------------------------------------
-# Each star measures both the parallel and perpendicular deflection, and
-# Gamma_perp = Gamma_par, so the GW cross-power picks up a factor of 2:
-#     P_ab = POL_FACTOR * F * P_gw * Gamma_par(Theta_ab)
-# POL_FACTOR multiplies P_ab ONLY. It is not applied to Gamma, to F, to the
-# amplitude-estimator normalization, or to (A_bar^2)^2.
-# Set to 1.0 to recover the parallel-only result.
-POL_FACTOR = 2.0
-if _os.environ.get('SLURM_POL_FACTOR'):
-    POL_FACTOR = float(_os.environ['SLURM_POL_FACTOR'])
+# All covariances below are for the PARALLEL component alone. The old
+# POL_FACTOR = 2 multiplied the GW power but not the noise, and the
+# estimators were not renormalized, so the estimators were biased
+# (<A^2_hat> = 2 P_gw) and the SNR was not self-consistent.
+#
+# If the parallel and perpendicular estimators are treated as independent
+# (the assumption discussed in the appendix), the combined SNR is
+# rho_tot = sqrt(rho_par^2 + rho_perp^2) = sqrt(2) rho_par, since
+# Gamma_perp = Gamma_par. Use combine_components() for that, AFTER the
+# SNR is computed. POL_FACTOR is kept only so old notebooks still import;
+# it is no longer used anywhere.
+POL_FACTOR = 1.0
 
-# Physical GW power spectrum at f_l
+
+def combine_components(rho):
+    """Combined parallel + perpendicular SNR under the independence
+    assumption: rho_tot = sqrt(2) * rho_par."""
+    return np.sqrt(2.0) * np.asarray(rho, dtype=float)
+
+
+# Physical GW power spectrum at f_l, STRAIN FORM (no geometric prefactor)
 # P_gw(f) = A_gw^2 / (12*pi^2) * (f/f_yr)^(-4/3) * f^(-1)
 P_gw_fl = (A_gw**2 / (12.0 * np.pi**2)) * (f_l / f_yr)**(-4.0/3.0) / f_l
 
-# Physical operating point on the x-axis used for vertical marker on plots
-# This is the actual value of P_gw/P_n with all constants plugged in
-PHYSICAL_RATIO = P_gw_fl / P_n
+
+# ============================================================
+#                  MODE COUPLING COEFFICIENT
+# ============================================================
+
+def F_sq(ell):
+    """
+    |F_l^E|^2 = |F_l^B|^2 = 1 / (N_l^2 * l(l+1))
+    N_l^2 = (l+2)(l+1)l(l-1) / 2
+    """
+    N_sq = ((ell + 2.0) * (ell + 1.0) * ell * (ell - 1.0)) / 2.0
+    return 1.0 / (N_sq * ell * (ell + 1.0))
+
+
+def gamma_raw_zero(ell_max, ell_min=2):
+    """
+    Gamma_raw(0) = sum_l (2l+1)/(4 pi) F_sq(l), since G1(0) = G2(0) = 1/2.
+    Converges quickly (terms ~ l^-5); ~0.0066.
+    """
+    ells = np.arange(max(ell_min, 2), int(ell_max) + 1, dtype=float)
+    return float(np.sum((2.0 * ells + 1.0) / (4.0 * np.pi) * F_sq(ells)))
+
+
+def deflection_prefactor(ell_max=100000, ell_min=2):
+    """K = 192 pi^3 Gamma_raw(0): maps the strain-form P_gw to the
+    deflection auto-power per component (the constant \\mathcal{K} in II.A)."""
+    return F_PHYS * gamma_raw_zero(ell_max, ell_min)
+
+
+def physical_ratio(ell_max=100000, ell_min=2):
+    """
+    Physical operating point on the x-axis, in the convention of the
+    current NORMALIZED_GAMMA mode:
+      normalized: K * P_gw_strain(f_l) / P_n   (deflection power ratio)
+      raw       :     P_gw_strain(f_l) / P_n   (strain-form ratio)
+    """
+    ratio_strain = P_gw_fl / P_n
+    return deflection_prefactor(ell_max, ell_min) * ratio_strain if NORMALIZED_GAMMA else ratio_strain
+
+
+# Strain-form ratio (independent of convention) and the operating point in
+# the current convention. The converged K is used here; the run's ell_max
+# changes it by far less than a percent.
+PHYSICAL_RATIO_STRAIN = P_gw_fl / P_n
+PHYSICAL_RATIO = physical_ratio()
 
 
 # ============================================================
@@ -261,19 +324,6 @@ def G2(ell, P1_ell, theta):
 
 
 # ============================================================
-#                  MODE COUPLING COEFFICIENT
-# ============================================================
-
-def F_sq(ell):
-    """
-    |F_l^E|^2 = |F_l^B|^2 = 1 / (N_l^2 * l(l+1))
-    N_l^2 = (l+2)(l+1)l(l-1) / 2
-    """
-    N_sq = ((ell + 2.0) * (ell + 1.0) * ell * (ell - 1.0)) / 2.0
-    return 1.0 / (N_sq * ell * (ell + 1.0))
-
-
-# ============================================================
 #                  GAMMA OVERLAP FUNCTION
 # ============================================================
 
@@ -349,7 +399,7 @@ def gamma_parallel(theta, ell_min, ell_max):
     _gamma_parallel_raw, so the NORMALIZED_GAMMA toggle applies everywhere
     consistently.
 
-    NORMALIZED_GAMMA = False (default): returns _gamma_parallel_raw(theta)
+    NORMALIZED_GAMMA = False: returns _gamma_parallel_raw(theta)
         unchanged, Gamma(0) ~ 0.0066.
     NORMALIZED_GAMMA = True: returns _gamma_parallel_raw(theta) /
         _gamma_parallel_raw(0), so Gamma(0) = 1 exactly.
@@ -363,9 +413,8 @@ def gamma_parallel(theta, ell_min, ell_max):
 
 def cp_single_star_gamma(ell_min, ell_max):
     """
-    Single-star CP overlap at zero separation: Gamma_o(0).
-    Used in the Sherman-Morrison reduction of the N x N CP covariance.
-    Independent of N and of the star field layout.
+    Single-star overlap at zero separation: Gamma(0).
+    1 in normalized mode, ~0.0066 in raw mode.
     """
     return float(gamma_parallel(np.array([0.0]), ell_min, ell_max)[0])
 
@@ -413,6 +462,9 @@ def gamma_parallel_matrix(theta_matrix, ell_min, ell_max, batch_size=None):
 # ============================================================
 #     SNR CALCULATIONS
 #
+#  All quantities below follow Romano et al. (2020) with chi -> Gamma.
+#  In normalized mode F = 1 and every formula is literally Romano's.
+#
 #  Common Process (CP):
 #    - Estimator: one per STAR (auto-correlation); covariance is N x N.
 #    - Full N x N covariance inverted exactly (rho_cp_full); the
@@ -423,35 +475,41 @@ def gamma_parallel_matrix(theta_matrix, ell_min, ell_max, batch_size=None):
 #      N_pairs x N_pairs.
 # ============================================================
 
-def rho_cp_weak(x, n_stars=N_STARS):
+def rho_cp_weak(x, n_stars=N_STARS, gamma0=1.0):
     """
-    CP weak-signal asymptote: rho ~ sqrt(N)*F*r.
-    x = r = P_gw/P_n (dimensionless). 
+    CP weak-signal asymptote, Romano Eq. (32): rho = sqrt(N/2) * F * Gamma(0) * r.
+    x = r = P_gw/P_n (dimensionless). The 1/2 comes from the variance of
+    the high-frequency noise estimate sigma_hat^2. F * Gamma(0) = 1 in
+    normalized mode; pass gamma0 = Gamma_raw(0) in raw mode.
     """
-    factor = gamma_scale_factor()
-    return np.sqrt(n_stars) * factor * np.asarray(x, dtype=float)
+    factor = gamma_scale_factor() * gamma0
+    return np.sqrt(n_stars / 2.0) * factor * np.asarray(x, dtype=float)
 
 
 def rho_cp_intermediate(gamma0):
     """
-    CP plateau IN THE UNIFORM-GAMMA LIMIT: rho -> 1/(POL_FACTOR*gamma0).
-    Only exact when Gamma_ab = gamma0 for every pair (the Sherman-Morrison
-    assumption). For the real field use rho_cp_strong_plateau(), which
-    depends on N and on the star layout.
+    CP plateau IN THE UNIFORM-GAMMA LIMIT: rho -> 1/gamma0 (= 1 normalized).
+    Only exact when Gamma_ab = gamma0 for every pair. For the real field use
+    rho_cp_strong_plateau(), which depends on N and on the star layout and
+    satisfies rho >= 1 whenever the Gamma matrix is positive semidefinite.
     """
-    return 1.0 / max(abs(POL_FACTOR * gamma0), EPS)
+    return 1.0 / max(abs(gamma0), EPS)
 
 
 # ------------------------------------------------------------
 #   CP: exact inversion of the full N x N covariance
 # ------------------------------------------------------------
 #
-# From my notes, with the factor of 2 (POL_FACTOR = c) on P_ab ONLY:
-#   P_ab    = 2 * F * P_gw * Gamma_ab                     (F = 192 pi^3)
-#   C~_ab   = P_ab + sigma^2 delta_ab
-#   C_ab    = f_l^{14/3} |C~_ab|^2 / F^2                  (Gaussian 4th moment)
-#   rho^2   = (A_bar^2)^2 sum_ab (C^-1)_ab,  (A_bar^2)^2 = P_gw^2 f_l^{14/3}
-# Gamma, F, the 1/F^2 estimator normalization and (A_bar^2)^2 carry no c.
+# Romano Eq. (29), with chi -> Gamma, in units of P_n:
+#   p        = F r                                    (F = 1 normalized)
+#   C~_ab    = p Gamma_ab + delta_ab                  (Gamma_aa = Gamma(0))
+#   C_ab     = |C~_ab|^2 + delta_ab                   (last term: variance of
+#                                                      the f_h noise estimate)
+#   rho^2    = (p Gamma(0))^2 sum_ab (C^-1)_ab        (the CP estimator
+#              targets the GW auto-power p Gamma(0); Gamma(0) = 1 normalized)
+# In the eigenbasis of G = Gamma o Gamma:
+#   C = p^2 [G + lam I],  lam = 2 Gamma(0)/p + 2/p^2
+#   rho^2 = Gamma(0)^2 sum_k s2_k / (g_k + lam)
 # ------------------------------------------------------------
 
 def cp_gamma_matrix(gamma_matrix, gamma0):
@@ -462,6 +520,37 @@ def cp_gamma_matrix(gamma_matrix, gamma0):
     if not np.all(np.isfinite(Gam)):
         raise ValueError('Gamma matrix has non-finite off-diagonal entries.')
     return Gam
+
+
+def gamma_psd_check(gamma_matrix, gamma0, verbose=True):
+    """
+    Eigenvalues of the full Gamma matrix (diagonal = Gamma(0)).
+
+    Gamma_par(Theta) used as a SCALAR correlation between stars is not
+    guaranteed to be positive definite on the sphere: its Legendre monopole
+    coefficient is negative (a_0 ~ -0.13, Schoenberg's criterion fails).
+    Compact fields cannot resolve the monopole, so Gamma stays PSD there;
+    fields approaching the full sky pick up a negative eigenvalue.
+
+    A physical correlation matrix is positive semidefinite. If the smallest
+    eigenvalue lam_min is negative, the data covariance C~ = p Gamma + I
+    becomes singular at p = -1/lam_min, i.e. r* = -1/(F lam_min), and both
+    SNR curves misbehave near r*. Returns (lam_min, r_star or None).
+    """
+    Gam = cp_gamma_matrix(gamma_matrix, gamma0)
+    lam = np.linalg.eigvalsh(Gam)
+    lam_min, lam_max = float(lam[0]), float(lam[-1])
+    r_star = None
+    if lam_min < -1e-10 * lam_max:
+        r_star = -1.0 / (gamma_scale_factor() * lam_min)
+    if verbose:
+        print(f'  Gamma matrix eig range [{lam_min:.3e}, {lam_max:.3e}]')
+        if r_star is not None:
+            n_neg = int(np.sum(lam < -1e-10 * lam_max))
+            print(f'  WARNING: Gamma has {n_neg} negative eigenvalue(s); data covariance '
+                  f'is singular near r* = {r_star:.3e}. SNR curves are not '
+                  f'trustworthy for r >~ r*.')
+    return lam_min, r_star
 
 
 def cp_covariance_eigensystem(gamma_matrix, gamma0, verbose=True):
@@ -501,29 +590,26 @@ def rho_cp_full(x_arr, gamma_matrix, ell_min, ell_max, verbose=True):
                    (diagonal may be NaN; it is replaced by Gamma(0))
     """
     F      = gamma_scale_factor()
-    c      = POL_FACTOR
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     x_arr  = np.asarray(x_arr, dtype=float)
 
     g, s2 = cp_covariance_eigensystem(gamma_matrix, gamma0, verbose=verbose)
 
-    p   = c * F * x_arr                              # P_ab / (P_n Gamma_ab)
-    lam = 2.0 * gamma0 / p + 1.0 / p**2              # shape (n_r,)
+    p   = F * x_arr                                  # P_gw-part per unit Gamma, in units of P_n
+    lam = 2.0 * gamma0 / p + 2.0 / p**2              # shape (n_r,)
 
     denom  = g[None, :] + lam[:, None]               # shape (n_r, N)
-    rho_sq = np.sum(s2[None, :] / denom, axis=1) / c**2   # (F r / p)^2 = 1/c^2
+    rho_sq = gamma0**2 * np.sum(s2[None, :] / denom, axis=1)
     return np.sqrt(np.maximum(rho_sq, 0.0))
 
 
 def rho_cp_full_direct(x_arr, gamma_matrix, ell_min, ell_max):
     """
-    Reference implementation: literally builds C_ab (up to the constant
-    f_l^{14/3} P_n^2 / F^2, which cancels against (A_bar^2)^2) at each r
-    and solves C y = 1. O(N^3) per r, so use it only to cross-check
+    Reference implementation: literally builds C_ab in units of P_n^2 at
+    each r and solves C y = 1. O(N^3) per r, so use it only to cross-check
     rho_cp_full at small N.
     """
     F      = gamma_scale_factor()
-    c      = POL_FACTOR
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     Gam = cp_gamma_matrix(gamma_matrix, gamma0)
     N = Gam.shape[0]
@@ -531,11 +617,10 @@ def rho_cp_full_direct(x_arr, gamma_matrix, ell_min, ell_max):
 
     out = np.zeros(len(np.atleast_1d(x_arr)))
     for k, r in enumerate(np.atleast_1d(x_arr)):
-        P_ab_over_Pn = c * F * r * Gam               # factor of 2 on P_ab only
-        Ctilde = P_ab_over_Pn + np.eye(N)            # C~ / P_n
-        C = Ctilde * Ctilde                          # element-wise |C~|^2
+        Ctilde = F * r * Gam + np.eye(N)             # C~ / P_n
+        C = Ctilde * Ctilde + np.eye(N)              # |C~|^2 + noise-estimate variance
         y = np.linalg.solve(C, ones)
-        out[k] = np.sqrt(max((F * r)**2 * float(ones @ y), 0.0))   # (A_bar^2)^2, no c
+        out[k] = np.sqrt(max((F * r * gamma0)**2 * float(ones @ y), 0.0))
     return out
 
 
@@ -544,54 +629,48 @@ def rho_cp_full_sherman_morrison(x_arr, ell_min, ell_max, n_stars=N_STARS):
     OLD closed form, kept only for comparison. Assumes Gamma_ab = gamma0
     for every pair, so C = alpha J + beta I and Sherman-Morrison applies:
 
-    rho^2_CP = N*(F*r)^2 / [1 + 2*c*F*gamma0*r + N*(c*F*gamma0*r)^2]
+    rho^2_CP = N (F r)^2 / [2 + 2 F gamma0 r + N (F gamma0 r)^2]
 
-    with c = POL_FACTOR on P_ab only. NOT correct for a real star field,
-    where Gamma_ab varies with separation. Use rho_cp_full instead.
+    NOT correct for a real star field, where Gamma_ab varies with
+    separation. Use rho_cp_full instead.
     """
     F      = gamma_scale_factor()
-    c      = POL_FACTOR
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     x_arr  = np.asarray(x_arr, dtype=float)
 
     Fr  = F * x_arr
-    pgr = c * F * gamma0 * x_arr                     # P_aa / P_n
+    pgr = F * gamma0 * x_arr                         # P_aa^gw / P_n
 
-    numer = n_stars * Fr**2
-    denom = 1.0 + 2.0 * pgr + n_stars * pgr**2
+    numer = n_stars * (Fr * gamma0)**2
+    denom = 2.0 + 2.0 * pgr + n_stars * pgr**2
 
     return np.sqrt(np.maximum(numer / denom, 0.0))
 
 
 def rho_cp_signal_dominated(gamma_matrix, ell_min, ell_max):
     """
-    The signal-dominated CP SNR, inverting exactly
-
-        C_ab   = f_l^{14/3} (c P_gw)^2 Gamma(Theta_ab)^2      (c = POL_FACTOR on P_ab)
-        rho^2  = (A_bar^2)^2 sum_ab (C^-1)_ab
-
-    Since (A_bar^2)^2 = P_gw^2 f_l^{14/3}, the constants cancel and
-    rho^2 = (1/c^2) sum_ab [(Gamma o Gamma)^-1]_ab. Solved with a linear
-    solve (no pseudo-inverse cutoff); compare with rho_cp_strong_plateau,
-    which drops near-null eigenmodes, to judge how much conditioning matters.
+    The signal-dominated CP SNR, rho^2 = sum_ab [(Gamma o Gamma)^-1]_ab
+    (Romano Eq. 31 with chi -> Gamma). Solved with a linear solve (no
+    pseudo-inverse cutoff); compare with rho_cp_strong_plateau, which drops
+    near-null eigenmodes, to judge how much conditioning matters.
     """
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     Gam = cp_gamma_matrix(gamma_matrix, gamma0)
     G = Gam * Gam
     y = np.linalg.solve(G, np.ones(G.shape[0]))
-    return float(np.sqrt(max(np.sum(y), 0.0)) / POL_FACTOR)
+    return float(gamma0 * np.sqrt(max(np.sum(y), 0.0)))
 
 
 def rho_cp_strong_plateau(gamma_matrix, ell_min, ell_max, rcond=1e-10):
     """
-    r -> infinity CP plateau with a pseudo-inverse: rho^2 = (1/c^2) 1^T G^+ 1,
-    G = Gamma o Gamma. Reduces to 1/(c gamma0) only for uniform Gamma.
+    r -> infinity CP plateau with a pseudo-inverse: rho^2 = 1^T G^+ 1,
+    G = Gamma o Gamma. Reduces to 1/gamma0 only for uniform Gamma.
     Eigenvalues below rcond * max|g| are dropped.
     """
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     g, s2 = cp_covariance_eigensystem(gamma_matrix, gamma0, verbose=False)
     keep = g > rcond * np.max(np.abs(g))
-    return float(np.sqrt(np.sum(s2[keep] / g[keep])) / POL_FACTOR)
+    return float(gamma0 * np.sqrt(np.sum(s2[keep] / g[keep])))
 
 
 def rho_hd_full(x_arr, gamma_matrix, ell_min, ell_max):
@@ -600,17 +679,16 @@ def rho_hd_full(x_arr, gamma_matrix, ell_min, ell_max):
     N_pairs x N_pairs covariance. For the full covariance use
     hd_full_matrix_snr.rho_hd_full_matrix.
 
-    Pair estimator normalized by F*Gamma_ab (no c), so for pair (a,b):
-        C_ab,ab / P_gw^2 = [P_a P_b + P_ab^2] / (P_gw F Gamma_ab)^2
-        P_ab = c F P_gw Gamma_ab,   P_a = P_n + c F P_gw Gamma(0)
+    Pair estimator normalized by F*Gamma_ab, so for pair (a,b):
+        C_ab,ab / P_gw^2 = [P_a P_b + P_ab^2] / (2 (P_gw F Gamma_ab)^2)
+        P_ab = F P_gw Gamma_ab,   P_a = P_n + F P_gw Gamma(0)
         rho^2_HD = sum_{a<b} 2 (P_gw F Gamma_ab)^2 / [P_ab^2 + P_a P_b]
 
     Asymptotes:
-      Weak  : rho^2 -> 2 F^2 sum(Gamma_ab^2) r^2
-      Strong: rho^2 -> (2/c^2) sum Gamma_ab^2 / (Gamma_ab^2 + gamma0^2)
+      Weak  : rho^2 -> 2 F^2 sum(Gamma_ab^2) r^2     (Romano Eq. 40)
+      Strong: rho^2 -> 2 sum Gamma_ab^2 / (Gamma_ab^2 + gamma0^2)
     """
     F      = gamma_scale_factor()
-    c      = POL_FACTOR
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     vals   = gamma_matrix[np.triu_indices_from(gamma_matrix, k=1)]
     gammas = vals[np.isfinite(vals) & (np.abs(vals) > EPS)]
@@ -621,9 +699,9 @@ def rho_hd_full(x_arr, gamma_matrix, ell_min, ell_max):
     P_gw_arr = x_arr[:, None] * P_n       # shape (n_r, 1)
     g        = gammas[None, :]            # shape (1, n_pairs)
 
-    P_ab = c * F * P_gw_arr * g                       # cross-power, factor on P_ab
-    P_a  = sigma_bar_sq + c * F * P_gw_arr * gamma0   # auto-power (a = b entry of P)
-    norm = F * P_gw_arr * g                           # estimator normalization, no c
+    P_ab = F * P_gw_arr * g                           # cross-power
+    P_a  = sigma_bar_sq + F * P_gw_arr * gamma0       # auto-power (a = b entry of P)
+    norm = F * P_gw_arr * g                           # estimator normalization
 
     rho_sq = np.sum(2.0 * norm**2 / (P_ab**2 + P_a**2), axis=1)
     return np.sqrt(np.maximum(rho_sq, 0.0))
@@ -634,7 +712,7 @@ def hd_diag_strong_plateau(gamma_matrix, ell_min, ell_max):
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
     vals = gamma_matrix[np.triu_indices_from(gamma_matrix, k=1)]
     vals = vals[np.isfinite(vals)]
-    return float(np.sqrt(2.0 * np.sum(vals**2 / (vals**2 + gamma0**2))) / POL_FACTOR)
+    return float(np.sqrt(2.0 * np.sum(vals**2 / (vals**2 + gamma0**2))))
 
 
 def print_snr_diagnostics(x_arr, rho_cp, rho_hd, ell_min, ell_max, gamma_matrix, n_stars=N_STARS):
@@ -651,7 +729,6 @@ def print_snr_diagnostics(x_arr, rho_cp, rho_hd, ell_min, ell_max, gamma_matrix,
     log_rho_hd = np.log10(np.maximum(rho_hd, 1e-300))
 
     # ── Weak-signal slope window: pick indices in x ~ [1e-12, 1e-10] ──
-    # This sits well below the physical ratio (~6e-11) and below any plateau.
     weak_mask = (x_arr >= 1e-12) & (x_arr <= 1e-10)
     if weak_mask.sum() >= 2:
         slope_cp_weak = np.polyfit(log_x[weak_mask], log_rho_cp[weak_mask], 1)[0]
@@ -671,7 +748,7 @@ def print_snr_diagnostics(x_arr, rho_cp, rho_hd, ell_min, ell_max, gamma_matrix,
     # ── Analytical plateaus ──
     n_pairs          = n_stars * (n_stars - 1) // 2
     cp_plateau_anal  = rho_cp_strong_plateau(gamma_matrix, ell_min, ell_max)  # sqrt(1^T G^+ 1)
-    cp_plateau_unif  = rho_cp_intermediate(gamma0)            # 1/(c*gamma0), uniform-Gamma limit
+    cp_plateau_unif  = rho_cp_intermediate(gamma0)            # 1/gamma0, uniform-Gamma limit
     hd_plateau_anal  = hd_diag_strong_plateau(gamma_matrix, ell_min, ell_max)
 
     # ── Numerical plateaus: max of each curve ──
@@ -685,9 +762,9 @@ def print_snr_diagnostics(x_arr, rho_cp, rho_hd, ell_min, ell_max, gamma_matrix,
     print('\n── Common Process (CP) ──')
     print(f'  Weak-signal slope   (x ~ 1e-12 to 1e-10):  {slope_cp_weak:+.3f}  (expect +1.0)')
     print(f'  Strong-signal slope (x ~ 1e-2  to 1e+1 ):  {slope_cp_strong:+.3f}  (expect ~0)')
-    print(f'  Plateau  [pinv    ] = sqrt(1^T G^+ 1)/c   = {cp_plateau_anal:.4f}')
-    print(f'  Plateau  [solve   ] = sqrt(1^T(GoG)^-1 1)/c = {rho_cp_signal_dominated(gamma_matrix, ell_min, ell_max):.4f}')
-    print(f'  Plateau  [uniform ] = 1/(c*gamma0) (SM)   = {cp_plateau_unif:.4f}')
+    print(f'  Plateau  [pinv    ] = sqrt(1^T G^+ 1)     = {cp_plateau_anal:.4f}')
+    print(f'  Plateau  [solve   ] = sqrt(1^T(GoG)^-1 1) = {rho_cp_signal_dominated(gamma_matrix, ell_min, ell_max):.4f}')
+    print(f'  Plateau  [uniform ] = 1/gamma0 (SM)       = {cp_plateau_unif:.4f}')
     print(f'  Plateau  [numeric ] = max(rho_CP)         = {cp_plateau_num:.4f}')
 
     print('\n── Hellings-Downs (HD) ──')
@@ -710,14 +787,15 @@ def main():
 
     gamma  = gamma_parallel_matrix(theta, ell_min, ell_max)
     gamma0 = cp_single_star_gamma(ell_min, ell_max)
+    phys   = physical_ratio(ell_max, ell_min)
 
     # Diagnostic quantities — printed for reference, NOT used to set x range
     factor     = gamma_scale_factor()
     rho_plat   = rho_cp_intermediate(gamma0)
-    transition = 1.0 / (np.sqrt(N_STARS) * POL_FACTOR * factor * gamma0)  # sqrt(N) F r = 1/(c gamma0)
+    transition = np.sqrt(2.0 / N_STARS) / (factor * gamma0)   # sqrt(N/2) F r = 1/gamma0
 
     print(f'\nNORMALIZED_GAMMA = {NORMALIZED_GAMMA}  (gamma_scale_factor = {factor:.4f})')
-    print(f'POL_FACTOR       = {POL_FACTOR:g}  (multiplies P_ab)')
+    print(f'K = 192 pi^3 Gamma_raw(0) = {deflection_prefactor(ell_max, ell_min):.4f}')
     print(f'\nINPUT PARAMETERS:')
     print(f'  sigma_rad        = {sigma_rad:.4e} rad')
     print(f'  sigma_bar^2      = {sigma_bar_sq:.4e}')
@@ -725,16 +803,16 @@ def main():
     print(f'  T_obs            = {T_obs_seconds:.3e} s')
     print(f'  f_low            = {f_l:.3e} Hz')
     print(f'  P_n              = {P_n:.3e} rad^2/Hz')
-    print(f'  P_gw(f_l)        = {P_gw_fl:.3e}')
-    print(f'  P_gw(f_l) / P_n  = {PHYSICAL_RATIO:.3e}  <-- actual operating point')
+    print(f'  P_gw(f_l) strain = {P_gw_fl:.3e}')
+    print(f'  operating point  = {phys:.3e}  <-- x-axis value of the physical signal')
     print(f'  N_stars          = {len(stars_deg)}')
     print(f'  gamma0           = {gamma0:.6f}')
-    print(f'  CP plateau rho   = {rho_plat:.4f}  (= 1/(c*gamma0), uniform-Gamma limit only)')
+    print(f'  CP plateau rho   = {rho_plat:.4f}  (= 1/gamma0, uniform-Gamma limit only)')
     print(f'  CP transition r* = {transition:.4e}  (diagnostic only)')
     print(f'  HD plateau rho   ~ {hd_diag_strong_plateau(gamma, ell_min, ell_max):.2f}  (diagonal approx, r -> inf)')
+    gamma_psd_check(gamma, gamma0)
 
     # ── Fixed sweep: covers the physical operating point AND both plateaus ──
-    # PHYSICAL_RATIO ~ 6e-11 sits deep in the weak-signal regime.
     x_arr = np.logspace(-13, 2, 400)
 
     print('\nComputing full curves...')
@@ -752,8 +830,8 @@ def main():
     ax.loglog(x_arr, rho_hd, color='C1', lw=2.5, label=r'$\rho_{\rm HD}$')
 
     # Mark the physical operating point — where the real signal sits on the curve
-    ax.axvline(PHYSICAL_RATIO, color='k', lw=1.2, ls='--',
-               label=rf'$P_{{\rm gw}}(f_l)/P_n = {PHYSICAL_RATIO:.1e}$')
+    ax.axvline(phys, color='k', lw=1.2, ls='--',
+               label=rf'Kepler-like signal, $P_{{\rm gw}}(f_l)/P_n = {phys:.1e}$')
 
     ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n(f_l)$', fontsize=13)
     ax.set_ylabel(r'$\rho$',                           fontsize=13)
@@ -767,7 +845,7 @@ def main():
     # batch job with no display, and tagged with N/FoV so different runs
     # don't overwrite each other's plot. The same convention is used in
     # hd_full_matrix_snr.py's output naming.
-    norm_tag = ("_normGamma" if NORMALIZED_GAMMA else "") + (f"_pol{POL_FACTOR:g}" if POL_FACTOR != 1 else "")
+    norm_tag = "_normGamma" if NORMALIZED_GAMMA else ""
     out_name = f"main_cp_hd_case3_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}{norm_tag}.png"
     plt.savefig(out_name, dpi=150)
     print(f"Saved plot to {out_name}")
@@ -783,11 +861,12 @@ def plot_full_snr(gamma_matrix, ell_min, ell_max):
     Called by external scripts. Uses the same fixed sweep as main().
     """
     x_arr  = np.logspace(-13, 2, 600)
-    gamma0 = cp_single_star_gamma(ell_min, ell_max)
 
     rho_full_cp  = rho_cp_full(x_arr, gamma_matrix, ell_min, ell_max)
     rho_plat     = rho_cp_strong_plateau(gamma_matrix, ell_min, ell_max)
-    rho_weak_arr = rho_cp_weak(x_arr, n_stars=gamma_matrix.shape[0])
+    rho_weak_arr = rho_cp_weak(x_arr, n_stars=gamma_matrix.shape[0],
+                               gamma0=cp_single_star_gamma(ell_min, ell_max))
+    phys         = physical_ratio(ell_max, ell_min)
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -797,8 +876,8 @@ def plot_full_snr(gamma_matrix, ell_min, ell_max):
                alpha=0.7, label=f'Strong-signal plateau ({rho_plat:.1f})')
     ax.loglog(x_arr, rho_full_cp, lw=2.5, color='C0',
               label=r'$\rho_{\rm CP}$ full')
-    ax.axvline(PHYSICAL_RATIO, color='k', lw=1.2, ls='--',
-               label=rf'Physical $r = {PHYSICAL_RATIO:.1e}$')
+    ax.axvline(phys, color='k', lw=1.2, ls='--',
+               label=rf'Kepler-like signal ${phys:.1e}$')
 
     ax.set_xlabel(r'$P_{\rm gw}(f_l)\,/\,P_n(f_l)$', fontsize=13)
     ax.set_ylabel(r'$\rho$',                           fontsize=13)

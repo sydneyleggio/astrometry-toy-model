@@ -26,8 +26,9 @@ from main import (
     gamma_parallel_matrix,
     gamma_scale_factor,
     cp_single_star_gamma,
+    gamma_psd_check,
+    physical_ratio,
     NORMALIZED_GAMMA,
-    POL_FACTOR,
     rho_cp_full,
     STAR_COORDS_DEG,
     N_STARS,
@@ -35,25 +36,24 @@ from main import (
     RANDOM_SEED,
     P_n,
     sigma_bar_sq,
-    PHYSICAL_RATIO,
 )
 
 EPS = 1e-14
 # Raw physical prefactor, kept importable for backward compatibility (some
 # notebooks compute F_PHYS * gamma_field directly for plotting/diagnostics).
 #
-# HD and CP share one definition of the power spectra (c = POL_FACTOR,
-# F = gamma_scale_factor() = 192 pi^3). The factor c sits on P_ab ONLY:
-#     P_ab = c * F * P_gw * Gamma_ab                (a != b, cross-power)
-#     P_a  = P_n + c * F * P_gw * Gamma(0)          (a = b, auto-power)
-# The pair estimator is normalized by F_ab = F * Gamma_ab (no c), and the
-# SNR prefactor is the amplitude P_gw^2 (no c). In units of P_gw:
-#     P~_ab = c F_ab,    P~_a = 1/r + c F Gamma(0)
+# Power spectra in units of P_gw, with F = gamma_scale_factor()
+# (F = 1 in normalized mode, 192 pi^3 in raw mode):
+#     P~_ab = F Gamma_ab                 (a != b, cross-power)
+#     P~_aa = 1/r + F Gamma(0)           (a = b, noise + GW auto-power)
+# Pair estimator: x_ab = P_hat_ab / (F Gamma_ab), with <x_ab> = P_gw.
+# Pair-pair covariance (Romano Eqs. 35-37, all three cases at once):
+#     C_ab,cd / P_gw^2 = (1/2) (P~_ac P~_bd + P~_ad P~_bc) / (F_ab F_cd)
 
 
 def hd_auto_power(gamma0: float) -> float:
-    """GW part of the auto-power, P_a^gw / P_gw = c * F * Gamma(0)."""
-    return POL_FACTOR * gamma_scale_factor() * float(gamma0)
+    """GW part of the auto-power, P_a^gw / P_gw = F * Gamma(0)."""
+    return gamma_scale_factor() * float(gamma0)
 
 
 F_PHYS = 192.0 * np.pi**3
@@ -75,9 +75,9 @@ class HDPairData:
 
     a_idx: np.ndarray
     b_idx: np.ndarray
-    Fab: np.ndarray       # estimator normalization F * Gamma_ab (pairs), no c
-    F: np.ndarray         # N x N matrix F * Gamma_ab, zero diagonal, no c
-    Paa_gw: float         # c * F * Gamma(0)
+    Fab: np.ndarray       # estimator normalization F * Gamma_ab (pairs)
+    F: np.ndarray         # N x N matrix F * Gamma_ab, zero diagonal
+    Paa_gw: float         # F * Gamma(0)
 
     @property
     def n_pairs(self) -> int:
@@ -88,10 +88,14 @@ class HDPairData:
 #                 PAIR GEOMETRY / HELPERS
 # ============================================================
 
-def build_hd_pair_data(gamma_matrix: np.ndarray, gamma0: float) -> HDPairData:
+def build_hd_pair_data(gamma_matrix: np.ndarray, gamma0: float,
+                       require_nonzero: bool = False) -> HDPairData:
     """Build the pair index arrays, the N x N F*Gamma matrix, and the
-    GW auto-power once. POL_FACTOR is NOT applied here; it enters only
-    when P~ is formed in make_hd_matvec / build_HD_matrices."""
+    GW auto-power once.
+
+    require_nonzero : only the legacy (normalized-estimator) formulation
+        divides by F_ab, so only it needs every pair to have |F_ab| > EPS.
+    """
     n_star = int(gamma_matrix.shape[0])
     #only upper-triangle when a < b, since the pair matrix is symmetric and we only need one copy of each pair
     a_idx, b_idx = np.triu_indices(n_star, k=1)
@@ -100,87 +104,181 @@ def build_hd_pair_data(gamma_matrix: np.ndarray, gamma0: float) -> HDPairData:
     np.fill_diagonal(F, 0.0)
     Fab = F[a_idx, b_idx]
 
-    if np.any(np.abs(Fab) < EPS):
+    if require_nonzero and np.any(np.abs(Fab) < EPS):
         raise ValueError(
-            "Some pairwise F_g values are too close to zero for the current "
-            "matrix-free formulation. Check the geometry / gamma_parallel output."
+            "Some pairwise F_g values are too close to zero for the legacy "
+            "formulation. Use formulation='weighted'."
         )
 
     return HDPairData(a_idx=a_idx, b_idx=b_idx, Fab=Fab, F=F, Paa_gw=hd_auto_power(gamma0))
 
 
+def _hd_power_matrix(data: HDPairData, r: float) -> np.ndarray:
+    """N x N power matrix P~ in units of P_gw: F Gamma_ab off the diagonal,
+    1/r + F Gamma(0) on it."""
+    P = np.array(data.F, dtype=float, copy=True)
+    np.fill_diagonal(P, 1.0 / float(r) + data.Paa_gw)
+    return P
+
+
 # ============================================================
-#                EXACT MATVEC FOR M(r)
+#     WEIGHTED (DIVISION-FREE) FORMULATION  -- default
+# ============================================================
+#
+# Work with the unnormalized cross-power estimators y_ab = P_hat_ab
+# instead of x_ab = P_hat_ab / F_ab. With D = diag(F_ab), x = D^-1 y, so
+#     C_x = D^-1 K D^-1   and   1^T C_x^-1 1 = F_ab^T K^-1 F_ab,
+# where K_ab,cd / P_gw^2 = (1/2) M'_ab,cd with
+#     M'_ab,cd = P~_ac P~_bd + P~_ad P~_bc.
+# Hence
+#     rho^2_HD = 2 F_ab^T (M')^-1 F_ab.
+# This is algebraically identical to the legacy form, never divides by
+# Gamma_ab, and M' is positive definite whenever P~ is (i.e. whenever the
+# Gamma matrix is positive semidefinite).
+
+def make_hd_weighted_matvec(data: HDPairData, r: float) -> Callable[[np.ndarray], np.ndarray]:
+    """Matrix-free product with M'(r): y_ab = (P~ Z P~)_ab, Z_cd = z_cd."""
+    a_idx = data.a_idx
+    b_idx = data.b_idx
+    n_pairs = data.n_pairs
+    P = _hd_power_matrix(data, r)
+
+    def matvec(z: np.ndarray) -> np.ndarray:
+        z = np.asarray(z, dtype=float)
+        if z.ndim != 1 or z.size != n_pairs:
+            raise ValueError(f"Expected vector of length {n_pairs}, got {z.shape}")
+        Z = np.zeros_like(P)
+        Z[a_idx, b_idx] = z
+        Z[b_idx, a_idx] = z
+        W = P @ Z @ P
+        return np.asarray(W[a_idx, b_idx], dtype=float)
+
+    return matvec
+
+
+def build_hd_weighted_dense(data: HDPairData, r: float) -> np.ndarray:
+    """Dense M'(r) (small problems only)."""
+    P = _hd_power_matrix(data, r)
+    a = data.a_idx
+    b = data.b_idx
+    return P[a[:, None], a[None, :]] * P[b[:, None], b[None, :]] \
+        + P[a[:, None], b[None, :]] * P[b[:, None], a[None, :]]
+
+
+def rho_hd_weighted_dense(x_arr, data: HDPairData, verbose=True):
+    """Dense solve of M' y = F_ab at each r. rho^2 = 2 F_ab . y"""
+    x_arr = np.asarray(x_arr, dtype=float)
+    rho_vals = np.zeros(len(x_arr), dtype=float)
+    t0 = time.time()
+    for k, r in enumerate(x_arr):
+        if verbose and (k % 25 == 0):
+            print(f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  ({time.time()-t0:.0f}s elapsed)", flush=True)
+        Mp = build_hd_weighted_dense(data, r)
+        y = np.linalg.solve(Mp, data.Fab)
+        rho_sq = 2.0 * float(np.dot(data.Fab, y))
+        rho_vals[k] = np.sqrt(max(rho_sq, 0.0))
+    return rho_vals
+
+
+def rho_hd_weighted_iterative(x_arr, data: HDPairData, svd_rcond=1e-10,
+                              maxiter: int | None = None, verbose=True):
+    """Matrix-free MINRES solve of M' y = F_ab with a Jacobi preconditioner,
+    warm-started along the r-grid. rho^2 = 2 F_ab . y"""
+    x_arr = np.asarray(x_arr, dtype=float)
+    rho_vals = np.zeros(len(x_arr), dtype=float)
+    t0 = time.time()
+    rhs = np.asarray(data.Fab, dtype=float)
+    x0 = None
+    base_maxiter = 2000 if maxiter is None else int(maxiter)
+
+    for k, r in enumerate(x_arr):
+        if verbose:
+            print(f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  ({time.time()-t0:.0f}s elapsed)", flush=True)
+
+        Aop = LinearOperator((data.n_pairs, data.n_pairs),
+                             matvec=make_hd_weighted_matvec(data, r), dtype=float)
+
+        # diag(M') = P~_aa P~_bb + P~_ab^2 > 0
+        paa = 1.0 / r + data.Paa_gw
+        diag = paa * paa + data.Fab * data.Fab
+        inv_diag = 1.0 / diag
+        Mop = LinearOperator((data.n_pairs, data.n_pairs),
+                             matvec=lambda v, inv_diag=inv_diag: inv_diag * np.asarray(v, dtype=float),
+                             dtype=float)
+
+        trials = [
+            (svd_rcond, base_maxiter),
+            (max(svd_rcond * 10.0, 1e-8), max(base_maxiter * 2, 4000)),
+            (max(svd_rcond * 100.0, 1e-7), max(base_maxiter * 5, 10000)),
+        ]
+        sol, info = None, None
+        for tol, trial_maxiter in trials:
+            kw = dict(M=Mop, maxiter=trial_maxiter, **_iterative_tol_kwargs(minres, tol))
+            if x0 is not None:
+                kw["x0"] = x0
+            sol, info = minres(Aop, rhs, **kw)
+            if info == 0:
+                break
+        if info != 0:
+            raise RuntimeError(f"MINRES did not converge for r={r:.3e} (info={info}).")
+
+        x0 = sol
+        rho_sq = 2.0 * float(np.dot(rhs, sol))
+        rho_vals[k] = np.sqrt(max(rho_sq, 0.0))
+
+    return rho_vals
+
+
+# ============================================================
+#     LEGACY (NORMALIZED-ESTIMATOR) FORMULATION
+#     Kept for cross-checks. Divides by F_ab, so it is badly conditioned
+#     when any Gamma_ab is near zero (wide fields).
 # ============================================================
 
 def make_hd_matvec(data: HDPairData, r: float) -> Callable[[np.ndarray], np.ndarray]:
-    """Return an exact matrix-vector product for M(r) = C(r) / P_gw^2.
-
-    The pair-pair covariance of the estimators x_ab = d_a d_b / F_ab is
+    """Return an exact matrix-vector product for M(r) = 2 C(r) / P_gw^2.
 
         M_ab,cd = (P~_ac P~_bd + P~_ad P~_bc) / (F_ab F_cd)
 
-    with P~ the N x N power matrix in units of P_gw:
-        off-diagonal  P~_ab = c F_ab               (factor of 2 on P_ab)
-        diagonal      P~_aa = 1/r + c F Gamma(0)   (noise + GW auto-power)
-
-    This single expression covers Case 1 (no shared star), Case 2 (one
-    shared star) and Case 3 (same pair). Summing over c<d is the same as
-    summing over all ordered c != d, so with Z_cd = x_cd / F_cd (symmetric,
-    zero diagonal):
+    Summing over c<d is the same as summing over all ordered c != d, so
+    with Z_cd = x_cd / F_cd (symmetric, zero diagonal):
 
         y_ab = (P~ Z P~)_ab / F_ab
-
-    Two N x N matrix products per call; the N_pairs x N_pairs matrix is
-    never formed.
     """
     a_idx = data.a_idx
     b_idx = data.b_idx
     Fab = data.Fab
     n_pairs = data.n_pairs
-
-    P = POL_FACTOR * data.F                              # cross-power P~_ab
-    np.fill_diagonal(P, 1.0 / float(r) + data.Paa_gw)    # auto-power P~_aa
+    P = _hd_power_matrix(data, r)
 
     def matvec(x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=float)
         if x.ndim != 1 or x.size != n_pairs:
             raise ValueError(f"Expected vector of length {n_pairs}, got {x.shape}")
-
-        # Lift the pair vector into a symmetric N x N matrix, Z_ab = x_ab / F_ab.
         Z = np.zeros_like(P)
         z = x / Fab
         Z[a_idx, b_idx] = z
         Z[b_idx, a_idx] = z
-
-        # (P~ Z P~)_ab = sum_{c != d} P~_ac Z_cd P~_db does the whole
-        # pairs-of-pairs sum, including shared-star and same-pair terms.
         W = P @ Z @ P
         return np.asarray(W[a_idx, b_idx] / Fab, dtype=float)
 
     return matvec
 
 
-# ============================================================
-#                 DENSE FALLBACK FOR SMALL N
-# ============================================================
-
 def build_HD_matrices(gamma_matrix: np.ndarray, gamma0: float):
-    """Dense decomposition M(r) = A + B/r + D/r^2 (small problems only).
+    """Legacy dense decomposition M(r) = A + B/r + D/r^2 (small problems only).
 
     M_ab,cd = (P~_ac P~_bd + P~_ad P~_bc) / (F_ab F_cd), F_ab = F Gamma_ab,
-    P~_ab = c F_ab (a != b), P~_aa = 1/r + p0 with p0 = c F Gamma(0).
-    The factor c = POL_FACTOR appears only through P~:
+    P~_ab = F_ab (a != b), P~_aa = 1/r + p0 with p0 = F Gamma(0):
 
-      Case 1 (no shared star):  c^2 (F_ac F_bd + F_ad F_bc) / (F_ab F_cd)
-      Case 2 (a = c, b != d):   c^2 + c (1/r + p0) F_bd / (F_ab F_ad)
-      Case 3 (same pair):       c^2 + (1/r + p0)^2 / F_ab^2
+      Case 1 (no shared star):  (F_ac F_bd + F_ad F_bc) / (F_ab F_cd)
+      Case 2 (a = c, b != d):   1 + (1/r + p0) F_bd / (F_ab F_ad)
+      Case 3 (same pair):       1 + (1/r + p0)^2 / F_ab^2
     """
     n_star = gamma_matrix.shape[0]
     pairs = np.array([(a, b) for a in range(n_star) for b in range(a + 1, n_star)])
     n_pairs = len(pairs)
 
-    c = POL_FACTOR
     p0 = hd_auto_power(gamma0)
     Fg_mat = gamma_scale_factor() * np.array(gamma_matrix, dtype=float)
     Fg_pair = Fg_mat[pairs[:, 0], pairs[:, 1]]
@@ -210,13 +308,11 @@ def build_HD_matrices(gamma_matrix: np.ndarray, gamma0: float):
     Fg_ad = Fg_mat[a_i, d_j]
     Fg_bc = Fg_mat[b_i, c_j]
 
-    # r^0 part: c^2 everywhere (the P~_ab P~_cd-type product), Case 1 geometry
-    A = np.full((n_pairs, n_pairs), c * c, dtype=float)
+    A = np.ones((n_pairs, n_pairs), dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
-        A_c1 = c * c * (Fg_ac * Fg_bd + Fg_ad * Fg_bc) / (Fg_ab * Fg_cd)
+        A_c1 = (Fg_ac * Fg_bd + Fg_ad * Fg_bc) / (Fg_ab * Fg_cd)
     A[case1] = A_c1[case1]
 
-    # Case 2 geometry factor F_(other,other) / (F_ab F_(shared,other))
     B2 = np.zeros((n_pairs, n_pairs), dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         B2[case2_ac] = (Fg_bd / (Fg_ab * Fg_ad))[case2_ac]
@@ -224,11 +320,9 @@ def build_HD_matrices(gamma_matrix: np.ndarray, gamma0: float):
         B2[case2_ad] = (Fg_bc / (Fg_ab * Fg_ac))[case2_ad]
         B2[case2_bd] = (Fg_ac / (Fg_ab * Fg_bc))[case2_bd]
 
-    # Case 2: c (1/r + p0) B2
-    A += c * p0 * B2
-    B = c * B2
+    A += p0 * B2
+    B = B2.copy()
 
-    # Case 3: (1/r + p0)^2 / F_ab^2
     diag_idx = np.diag_indices(n_pairs)
     A[diag_idx] += p0**2 / Fg_pair**2
     B[diag_idx] += 2.0 * p0 / Fg_pair**2
@@ -239,28 +333,19 @@ def build_HD_matrices(gamma_matrix: np.ndarray, gamma0: float):
 
 
 def rho_hd_full_matrix_dense(x_arr, gamma_matrix, gamma0, svd_rcond=1e-10, verbose=True):
-    """Original dense eigendecomposition path."""
+    """Legacy dense eigendecomposition path."""
     if verbose:
         print("Building HD covariance matrices A, B, D...", flush=True)
     t0 = time.time()
     _, A, B, D = build_HD_matrices(gamma_matrix, gamma0)
     n_pairs = A.shape[0]
     if verbose:
-        print(
-            f"  Done ({time.time()-t0:.1f}s). Matrix: {n_pairs}x{n_pairs}",
-            flush=True,
-        )
+        print(f"  Done ({time.time()-t0:.1f}s). Matrix: {n_pairs}x{n_pairs}", flush=True)
 
     x_arr = np.asarray(x_arr, dtype=float)
     rho_vals = np.zeros(len(x_arr), dtype=float)
 
     for k, r in enumerate(x_arr):
-        if verbose:
-            print(
-                f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  ({time.time()-t0:.0f}s elapsed)",
-                flush=True,
-            )
-
         M = A + B / r + D / r**2
         eigvals, eigvecs = np.linalg.eigh(M)
         thresh = svd_rcond * np.max(np.abs(eigvals))
@@ -273,7 +358,7 @@ def rho_hd_full_matrix_dense(x_arr, gamma_matrix, gamma0, svd_rcond=1e-10, verbo
 
 
 # ============================================================
-#            FULL HD SNR VIA MATRIX-FREE SOLVER
+#            FULL HD SNR  (public entry point)
 # ============================================================
 
 def rho_hd_full_matrix(
@@ -284,112 +369,78 @@ def rho_hd_full_matrix(
     verbose=True,
     dense_cutover_pairs: int = 3000,
     maxiter: int | None = None,
+    formulation: str = "weighted",
 ):
     """Full HD SNR curve including all three covariance cases.
 
-    For small pair counts, this uses the original dense eigendecomposition.
-    For larger problems, it solves M(r) x = 1 with MINRES and a Jacobi
-    preconditioner, using the exact matrix-vector product above.
+    formulation : "weighted" (default) uses the division-free form
+        rho^2 = 2 F_ab^T (M')^-1 F_ab. "legacy" uses the original
+        normalized-estimator form (divides by F_ab); kept for cross-checks.
 
-    Parameters
-    ----------
-    x_arr : array_like
-        r = P_gw / sigma_bar^2 values.
-    gamma_matrix : ndarray
-        Geometry-dependent gamma matrix.
-    gamma0 : float
-        Gamma(0), sets the per-star GW auto-power c*F*Gamma(0).
-    svd_rcond : float
-        Used as the relative tolerance for the iterative solver in the large-N
-        path, and as the eigenvalue cutoff in the dense fallback.
-    dense_cutover_pairs : int
-        Use the dense path only when N_pairs <= this threshold.
-    maxiter : int or None
-        Maximum MINRES iterations per r-value. None lets SciPy choose.
+    Dense solve when N_pairs <= dense_cutover_pairs, otherwise matrix-free
+    MINRES with a Jacobi preconditioner, warm-started along the r-grid.
+    Always pass the full, sorted r-grid (not single cold-started values).
     """
     x_arr = np.asarray(x_arr, dtype=float)
+
+    if formulation == "legacy":
+        data = build_hd_pair_data(gamma_matrix, gamma0, require_nonzero=True)
+        if data.n_pairs <= dense_cutover_pairs:
+            return rho_hd_full_matrix_dense(x_arr, gamma_matrix, gamma0, svd_rcond=svd_rcond, verbose=verbose)
+        return _rho_hd_legacy_iterative(x_arr, data, svd_rcond, maxiter, verbose)
+
+    if formulation != "weighted":
+        raise ValueError("formulation must be 'weighted' or 'legacy'")
+
     data = build_hd_pair_data(gamma_matrix, gamma0)
-
-    if data.n_pairs <= dense_cutover_pairs:
-        if verbose:
-            print(
-                f"Using dense fallback path (N_pairs={data.n_pairs} <= {dense_cutover_pairs})",
-                flush=True,
-            )
-        return rho_hd_full_matrix_dense(x_arr, gamma_matrix, gamma0, svd_rcond=svd_rcond, verbose=verbose)
-
     if verbose:
-        print("Building matrix-free HD operator...", flush=True)
-        print(
-            f"  N_stars={gamma_matrix.shape[0]}, N_pairs={data.n_pairs}",
-            flush=True,
-        )
+        print(f"HD weighted formulation: N_stars={gamma_matrix.shape[0]}, N_pairs={data.n_pairs}", flush=True)
+    if data.n_pairs <= dense_cutover_pairs:
+        return rho_hd_weighted_dense(x_arr, data, verbose=verbose)
+    return rho_hd_weighted_iterative(x_arr, data, svd_rcond=svd_rcond, maxiter=maxiter, verbose=verbose)
 
+
+def _rho_hd_legacy_iterative(x_arr, data, svd_rcond, maxiter, verbose):
+    """Legacy matrix-free MINRES/GMRES path (normalized estimators)."""
     rho_vals = np.zeros(len(x_arr), dtype=float)
     t0 = time.time()
-
     ones_rhs = np.ones(data.n_pairs, dtype=float)
     x0 = None
+    base_maxiter = 2000 if maxiter is None else int(maxiter)
 
     for k, r in enumerate(x_arr):
         if verbose:
-            print(
-                f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  ({time.time()-t0:.0f}s elapsed)",
-                flush=True,
-            )
+            print(f"  r[{k+1}/{len(x_arr)}] = {r:.3e}  ({time.time()-t0:.0f}s elapsed)", flush=True)
 
-        matvec = make_hd_matvec(data, r)
-        Aop = LinearOperator((data.n_pairs, data.n_pairs), matvec=matvec, dtype=float)
-
-        # Diagonal of M(r): c^2 + (1/r + p0)^2 / F_ab^2
-        diag = POL_FACTOR**2 + (1.0 / r + data.Paa_gw) ** 2 / (data.Fab * data.Fab)
+        Aop = LinearOperator((data.n_pairs, data.n_pairs), matvec=make_hd_matvec(data, r), dtype=float)
+        diag = 1.0 + (1.0 / r + data.Paa_gw) ** 2 / (data.Fab * data.Fab)
         inv_diag = 1.0 / diag
-        Mop = LinearOperator(
-            (data.n_pairs, data.n_pairs),
-            matvec=lambda v, inv_diag=inv_diag: inv_diag * np.asarray(v, dtype=float),
-            dtype=float,
-        )
+        Mop = LinearOperator((data.n_pairs, data.n_pairs),
+                             matvec=lambda v, inv_diag=inv_diag: inv_diag * np.asarray(v, dtype=float),
+                             dtype=float)
 
-        base_maxiter = 2000 if maxiter is None else int(maxiter)
-        minres_trials = [
+        trials = [
             (svd_rcond, base_maxiter),
             (max(svd_rcond * 10.0, 1e-8), max(base_maxiter * 2, 4000)),
             (max(svd_rcond * 100.0, 1e-7), max(base_maxiter * 5, 10000)),
         ]
-
-        sol = None
-        info = None
-        last_tol = None
-        last_maxiter = None
-
-        for tol, trial_maxiter in minres_trials:
+        sol, info, last_tol = None, None, None
+        for tol, trial_maxiter in trials:
             last_tol = tol
-            last_maxiter = trial_maxiter
-            kwargs = _iterative_tol_kwargs(minres, tol)
-            minres_kwargs = dict(M=Mop, maxiter=trial_maxiter, **kwargs)
+            kw = dict(M=Mop, maxiter=trial_maxiter, **_iterative_tol_kwargs(minres, tol))
             if x0 is not None:
-                minres_kwargs["x0"] = x0
-            sol, info = minres(Aop, ones_rhs, **minres_kwargs)
+                kw["x0"] = x0
+            sol, info = minres(Aop, ones_rhs, **kw)
             if info == 0:
                 break
-
         if info != 0:
-            # GMRES is less memory-frugal than MINRES, but it is a useful
-            # fallback when the symmetric iteration struggles at a few r values.
-            gmres_restart = min(200, data.n_pairs)
-            gmres_maxiter = max(100, base_maxiter)
-            gmres_tol = last_tol if last_tol is not None else svd_rcond
-            gmres_kwargs = _iterative_tol_kwargs(gmres, gmres_tol)
-            gmres_call = dict(M=Mop, restart=gmres_restart, maxiter=gmres_maxiter, **gmres_kwargs)
+            kw = dict(M=Mop, restart=min(200, data.n_pairs), maxiter=max(100, base_maxiter),
+                      **_iterative_tol_kwargs(gmres, last_tol))
             if x0 is not None:
-                gmres_call["x0"] = x0
-            sol, info = gmres(Aop, ones_rhs, **gmres_call)
-
+                kw["x0"] = x0
+            sol, info = gmres(Aop, ones_rhs, **kw)
         if info != 0:
-            raise RuntimeError(
-                f"Iterative solver did not converge for r={r:.3e} (info={info}). "
-                f"Last MINRES tol={last_tol:.1e}, maxiter={last_maxiter}."
-            )
+            raise RuntimeError(f"Iterative solver did not converge for r={r:.3e} (info={info}).")
 
         x0 = sol
         rho_sq = 2.0 * float(np.sum(sol))
@@ -397,23 +448,13 @@ def rho_hd_full_matrix(
 
     return rho_vals
 
+
 def hd_strong_signal_plateau(gamma_matrix):
     """
-    Closed-form approximation for the strong-signal (r -> infinity) HD plateau,
-    using the full N_pairs x N_pairs covariance matrix (not just the diagonal
-    Case-3-only approximation).
-
-    rho^2_HD,intermediate ~= F0^2 * N(N-1) / [F0^2*(N^2-3N+3) + 2*F0*(N-2) + 1]
-
-    LEGACY: derived with per-star GW auto-power = P_gw and no POL_FACTOR.
-    It does not include the c*F*Gamma(0) auto-power or the factor of 2 on
-    P_ab now used in the covariance, so it no longer predicts the numeric
-    plateau. Kept for reference only.
-
-    IMPORTANT: this approximation degrades for wide or full-sky fields, where
-    gamma_ab is no longer close to uniform across pairs. Treat this
-    as a narrow-field-only diagnostic, and rely on the numeric
-    plateau (max(rho_hd)) instead for wide or full-sky fields.
+    LEGACY closed-form approximation for the HD plateau, derived in the old
+    convention (per-star GW auto-power = P_gw, cross-power F Gamma P_gw).
+    It does not apply in the normalized convention. Kept for reference only;
+    rely on the numeric plateau (max(rho_hd)).
     """
     n_star = gamma_matrix.shape[0]
     Fg = gamma_scale_factor() * gamma_matrix
@@ -429,18 +470,14 @@ def hd_strong_signal_plateau(gamma_matrix):
 
 def print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, gamma_matrix, n_stars=N_STARS):
     """
-    Print weak/strong-signal slopes and plateau values for CP and HD curves.
-
-    Slopes computed via log-log linear regression over designated windows.
-    CP plateau is the exact r -> inf limit of the full covariance. HD plateau now has a closed-form
-    approximation too (see hd_strong_signal_plateau), valid when F_ab is
-    close to uniform across pairs -- which is the geometrically-uniform,
-    narrow-field regime this paper's results are computed in.
+    Print weak/strong-signal slopes, weak-signal amplitudes against Romano's
+    closed forms, and plateau values for CP and HD curves.
     """
-    from main import cp_single_star_gamma
+    from main import rho_cp_strong_plateau
 
     gamma0   = cp_single_star_gamma(ell_min, ell_max)
     n_pairs  = n_stars * (n_stars - 1) // 2
+    F        = gamma_scale_factor()
 
     log_r      = np.log10(r_values)
     log_rho_cp = np.log10(np.maximum(rho_cp, 1e-300))
@@ -450,25 +487,25 @@ def print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, gamma_matr
         mask = (10**log_x >= x_lo) & (10**log_x <= x_hi)
         if mask.sum() < 2:
             print(f'  WARNING: fewer than 2 points in {label} window [{x_lo:.0e}, {x_hi:.0e}] — '
-                  f'try increasing n_r in plot_full_comparison.')
+                  f'try increasing pts_per_decade in plot_full_comparison.')
             return float('nan')
         return float(np.polyfit(log_x[mask], log_y[mask], 1)[0])
 
-    # Weak-signal window: well below the physical ratio (~6e-11)
-    slope_cp_weak = slope_in_window(log_r, log_rho_cp, 1e-13, 1e-11, 'CP weak')
-    slope_hd_weak = slope_in_window(log_r, log_rho_hd, 1e-13, 1e-11, 'HD weak')
-
-    # Strong-signal window: deep in saturation
+    slope_cp_weak = slope_in_window(log_r, log_rho_cp, 1e-10, 1e-8, 'CP weak')
+    slope_hd_weak = slope_in_window(log_r, log_rho_hd, 1e-10, 1e-8, 'HD weak')
     slope_cp_strong = slope_in_window(log_r, log_rho_cp, 1e-2, 1e1, 'CP strong')
     slope_hd_strong = slope_in_window(log_r, log_rho_hd, 1e-2, 1e1, 'HD strong')
 
-    # CP plateau: exact r -> inf limit of the full covariance, sqrt(1^T G^+ 1)
-    from main import rho_cp_strong_plateau
+    # Weak-signal amplitudes: rho / r should equal Romano's coefficients
+    g = gamma_matrix[np.triu_indices_from(gamma_matrix, k=1)]
+    sum_g2 = float(np.nansum((F * g) ** 2))
+    cp_coef_expected = np.sqrt(n_stars / 2.0) * F * gamma0
+    hd_coef_expected = np.sqrt(2.0 * sum_g2)
+    cp_coef_num = float(rho_cp[0] / r_values[0])
+    hd_coef_num = float(rho_hd[0] / r_values[0])
+
     cp_plateau_anal = rho_cp_strong_plateau(gamma_matrix, ell_min, ell_max)
     cp_plateau_num  = float(np.max(rho_cp))
-
-    # HD plateau: closed-form approximation (uniform-F_ab limit) vs. numeric.
-    hd_plateau_anal = hd_strong_signal_plateau(gamma_matrix)
     hd_plateau_num  = float(np.max(rho_hd))
 
     print('\n' + '='*60)
@@ -477,16 +514,21 @@ def print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, gamma_matr
     print('='*60)
 
     print('\n── Common Process (CP) ──')
-    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_cp_weak:+.3f}')
+    print(f'  Weak-signal slope   (r ~ 1e-10 to 1e-8 ):  {slope_cp_weak:+.3f}')
     print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_cp_strong:+.3f}')
+    print(f'  Weak coef rho/r     numeric = {cp_coef_num:.4e}, sqrt(N/2) F Gamma(0) = {cp_coef_expected:.4e}')
     print(f'  Plateau [exact   ]  = sqrt(1^T G^+ 1)      = {cp_plateau_anal:.4f}')
     print(f'  Plateau [numeric ]  = max(rho_CP)          = {cp_plateau_num:.4f}')
 
     print('\n── Hellings-Downs (HD) — full covariance matrix ──')
-    print(f'  Weak-signal slope   (r ~ 1e-13 to 1e-11):  {slope_hd_weak:+.3f}')
+    print(f'  Weak-signal slope   (r ~ 1e-10 to 1e-8 ):  {slope_hd_weak:+.3f}')
     print(f'  Strong-signal slope (r ~ 1e-2  to 1e+1 ):  {slope_hd_strong:+.3f}')
-    print(f'  Plateau [legacy  ]  = F_aa=1 uniform approx = {hd_plateau_anal:.4f}')
+    print(f'  Weak coef rho/r     numeric = {hd_coef_num:.4e}, sqrt(2 sum F^2 G^2) = {hd_coef_expected:.4e}')
     print(f'  Plateau [numeric ]  = max(rho_HD)          = {hd_plateau_num:.4f}')
+
+    print('\n── Weak-signal ratio ──')
+    print(f'  rho_HD/rho_CP numeric = {hd_coef_num / cp_coef_num:.4f}, '
+          f'expected sqrt(4 sum G^2 / N)/Gamma(0) = {np.sqrt(4.0 * sum_g2 / n_stars) / (F * gamma0):.4f}')
     print('='*60 + '\n')
 
 
@@ -494,31 +536,37 @@ def print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, gamma_matr
 #                          PLOT
 # ============================================================
 
-def plot_full_comparison(gamma_matrix, ell_min, ell_max, n_r=150, save_path=None):
-    """Plot CP and HD SNR on the same axes."""
-    r_values = np.logspace(-13, 2, n_r)
+R_MIN = 1e-13          # left edge of every SNR plot
+R_MAX = 1e3            # right edge; all HD solvers agree to <1e-5 up to here
+PTS_PER_DECADE = 10
+
+
+def plot_full_comparison(gamma_matrix, ell_min, ell_max, save_path=None,
+                         r_min=R_MIN, r_max=R_MAX, pts_per_decade=PTS_PER_DECADE):
+    """Plot CP and HD SNR on the same axes over [r_min, r_max]."""
+    n_r = int(round(pts_per_decade * np.log10(r_max / r_min))) + 1
+    r_values = np.logspace(np.log10(r_min), np.log10(r_max), n_r)
+    gamma0 = cp_single_star_gamma(ell_min, ell_max)
+    phys = physical_ratio(ell_max, ell_min)
+
+    print("Checking Gamma matrix positivity...", flush=True)
+    gamma_psd_check(gamma_matrix, gamma0)
 
     print("Computing CP full curve...", flush=True)
     rho_cp = rho_cp_full(r_values, gamma_matrix, ell_min, ell_max)
 
     print("\nComputing HD full curve...", flush=True)
-    rho_hd = rho_hd_full_matrix(r_values, gamma_matrix, cp_single_star_gamma(ell_min, ell_max), verbose=True)
+    rho_hd = rho_hd_full_matrix(r_values, gamma_matrix, gamma0, verbose=True)
 
-    print(f"\nPhysical r = P_gw/P_n = {PHYSICAL_RATIO:.3e}")
+    print(f"\nKepler-like operating point P_gw/P_n = {phys:.3e}")
     print_snr_diagnostics(r_values, rho_cp, rho_hd, ell_min, ell_max, gamma_matrix, n_stars=gamma_matrix.shape[0])
-
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.loglog(r_values, rho_cp, color="C0", lw=2.5, label=r"$\rho_{\rm CP}$")
-    ax.loglog(
-        r_values,
-        rho_hd,
-        color="C1",
-        lw=2.5,
-        label=r"$\rho_{\rm HD}$",
-    )
-    ax.axvline(PHYSICAL_RATIO, color="k", lw=1.2, ls="--", label=rf"physical $r = {PHYSICAL_RATIO:.1e}$")
+    ax.loglog(r_values, rho_hd, color="C1", lw=2.5, label=r"$\rho_{\rm HD}$")
+    ax.axvline(phys, color="k", lw=1.2, ls="--", label=rf"Kepler-like signal ${phys:.1e}$")
 
+    ax.set_xlim(r_min, r_max)
     ax.set_xlabel(r"$P_{\rm gw}(f_l)\,/\,P_n(f_l)$", fontsize=13)
     ax.set_ylabel(r"$\rho$", fontsize=13)
     ax.set_title("CP and HD Full SNR", fontsize=13)
@@ -547,27 +595,22 @@ if __name__ == "__main__":
     print(f"ell_min={ell_min}, ell_max={ell_max}, N_stars={N_STARS}")
     print(f"N_pairs = {N_STARS * (N_STARS - 1) // 2}")
     print(f"NORMALIZED_GAMMA = {NORMALIZED_GAMMA}  (gamma_scale_factor = {gamma_scale_factor():.4f})")
-    print(f"POL_FACTOR       = {POL_FACTOR:g}  (multiplies P_ab)")
 
     gamma = gamma_parallel_matrix(theta_mat, ell_min, ell_max)
 
     # Tag the output filename with N/FoV (and normalization state) so
     # multiple Slurm array tasks / comparison runs don't overwrite each
     # other's plot.
-    norm_tag = ("_normGamma" if NORMALIZED_GAMMA else "") + (f"_pol{POL_FACTOR:g}" if POL_FACTOR != 1 else "")
+    norm_tag = "_normGamma" if NORMALIZED_GAMMA else ""
     out_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}{norm_tag}.png"
 
     r_vals, rho_cp, rho_hd = plot_full_comparison(
         gamma,
         ell_min,
         ell_max,
-        n_r=150,
         save_path=out_name,
     )
 
-    # Save the underlying arrays alongside the plot, tagged with the same
-    # N/FoV convention as the PNG filename, so future runs can be compared
-    # and overlaid with compare_snr_runs_fullmatrix.py.
     data_name = f"hd_full_matrix_snr_N{N_STARS}_FoV{FIELD_SIZE_DEG:g}{norm_tag}.npz"
     np.savez(
         data_name,
@@ -578,9 +621,8 @@ if __name__ == "__main__":
         FIELD_SIZE_DEG=FIELD_SIZE_DEG,
         ell_min=ell_min,
         ell_max=ell_max,
-        PHYSICAL_RATIO=PHYSICAL_RATIO,
+        PHYSICAL_RATIO=physical_ratio(ell_max, ell_min),
         NORMALIZED_GAMMA=NORMALIZED_GAMMA,
-        POL_FACTOR=POL_FACTOR,
     )
     print(f"Data saved to {data_name}")
 
