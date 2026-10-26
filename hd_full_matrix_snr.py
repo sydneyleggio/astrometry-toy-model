@@ -564,9 +564,9 @@ def plot_full_comparison(gamma_matrix, ell_min, ell_max, save_path=None,
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.loglog(r_values, rho_cp, color="C0", lw=2.5, label=r"$\rho_{\rm CP}$")
     ax.loglog(r_values, rho_hd, color="C1", lw=2.5, label=r"$\rho_{\rm HD}$")
-    ax.axvline(phys, color="k", lw=1.2, ls="--", label=rf"Kepler-like signal ${phys:.1e}$")
 
-    ax.set_xlim(r_min, r_max)
+    pad = 1.0                                              # decades of empty space on each side
+    ax.set_xlim(r_min / 10**pad, r_max * 10**pad)
     ax.set_xlabel(r"$P_{\rm gw}(f_l)\,/\,P_n(f_l)$", fontsize=13)
     ax.set_ylabel(r"$\rho$", fontsize=13)
     ax.set_title("CP and HD Full SNR", fontsize=13)
