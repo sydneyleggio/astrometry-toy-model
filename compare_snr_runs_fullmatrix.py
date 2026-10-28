@@ -35,15 +35,16 @@ import matplotlib.pyplot as plt
 # EDIT THIS LIST — paths to the .npz files you want to compare
 # ------------------------------------------------------------
 FILES = [
-    "hd_full_matrix_snr_N10_FoV10_normGamma.npz",
-    "hd_full_matrix_snr_N40_FoV20_normGamma.npz",
-    "hd_full_matrix_snr_N90_FoV30_normGamma.npz",
-    "hd_full_matrix_snr_N160_FoV40_normGamma.npz",
-    "hd_full_matrix_snr_N250_FoV50_normGamma.npz",
-    "hd_full_matrix_snr_N360_FoV60_normGamma.npz",
-    "hd_full_matrix_snr_N490_FoV70_normGamma.npz",
-    "hd_full_matrix_snr_N640_FoV80_normGamma.npz",
-    "hd_full_matrix_snr_N810_FoV90_normGamma.npz",
+    "hd_full_matrix_snr_N100_FoV10_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV20_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV30_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV40_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV50_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV60_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV70_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV80_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV90_normGamma_exact.npz",
+    "hd_full_matrix_snr_N100_FoV100_normGamma_exact.npz",
 ]
 
 # Output filename for the comparison plot
@@ -109,7 +110,7 @@ def plot_comparison(files, out_path="snr_comparison.png", title=None):
     else:
         runs.sort(key=lambda r: (r["N_STARS"], r["FIELD_SIZE_DEG"]))
 
-    fig, ax = plt.subplots(figsize=(10.5, 6.8))
+    fig, ax = plt.subplots(figsize=(8, 5))
 
     cp_cmap = plt.colormaps["Blues"]
     hd_cmap = plt.colormaps["Oranges"]
@@ -133,12 +134,7 @@ def plot_comparison(files, out_path="snr_comparison.png", title=None):
     # All runs share the same physical operating point (it only depends on
     # fixed instrument/GW constants, not on N or FoV), so one vertical line
     # suffices regardless of sweep type.
-    phys_r = runs[0]["PHYSICAL_RATIO"]
-    ax.axvline(phys_r, color="k", lw=1.2, ls=":", alpha=0.7,
-               label=rf"physical $r={phys_r:.1e}$")
-
-    ax.set_xlabel(r"$P_{\rm gw}(f_l)\,/\,P_n(f_l)$", fontsize=13)
-    ax.set_ylabel(r"$\rho$", fontsize=13)
+    ax.axhline(y=1, color="gray", linestyle="--", lw=1.5, alpha=0.7, label=r"$\rho=1$")
 
     if title is None:
         if sweep_type == "N":
@@ -149,10 +145,13 @@ def plot_comparison(files, out_path="snr_comparison.png", title=None):
             title = f"CP and HD Full SNR Curves \u2014 FoV sweep (N = {n})"
         else:
             title = "CP and HD Full SNR Curves \u2014 Joint N/FoV Scaling"
-    ax.set_title(title, fontsize=13)
+    #ax.set_title(title, fontsize=13)
 
     ax.grid(alpha=0.3, which="both")
-    ax.legend(fontsize=8, ncol=2, loc="lower right")
+    ax.legend(fontsize=8.5, ncol=2, loc="lower right")
+    ax.set_xlabel(r"$P_{\rm gw}(f_l)\,/\,P_n(f_l)$", fontsize=14)
+    ax.set_ylabel(r"$\rho$", fontsize=14)
+    ax.tick_params(axis='both', which='major', labelsize=14)
     plt.tight_layout()
     plt.savefig(out_path, dpi=160)
     print(f"Saved comparison plot to {out_path}  (detected sweep type: {sweep_type})")
